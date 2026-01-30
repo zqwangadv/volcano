@@ -171,7 +171,7 @@ func ExtractResourceRequest(pod *v1.Pod, resourceType, countName, memoryName, pe
 	resourceMem := v1.ResourceName(memoryName)
 	counts := []ContainerDeviceRequest{}
 
-	//Count Nvidia GPU
+	//Count DCU
 	for i := 0; i < len(pod.Spec.Containers); i++ {
 		singledevice := false
 		v, ok := pod.Spec.Containers[i].Resources.Limits[resourceName]

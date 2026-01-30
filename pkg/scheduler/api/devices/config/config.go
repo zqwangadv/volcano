@@ -68,6 +68,7 @@ type Config struct {
 	//NvidiaConfig is used for vGPU feature for nvidia, gpushare is not using this config
 	NvidiaConfig NvidiaConfig `yaml:"nvidia"`
 	VNPUs        []VNPUConfig `yaml:"vnpus"`
+	HygonConfig  HygonConfig  `yaml:"hygon"`
 }
 
 var (
@@ -147,6 +148,17 @@ func GetDefaultDevicesConfig() *Config {
 					},
 				},
 			},
+		},
+		HygonConfig: HygonConfig{
+			ResourceCountName:   HygonVDCUNumber,
+			ResourceCoreName:    HygonVDCUCores,
+			ResourceMemoryName:  HygonVDCUMemory,
+			DefaultMemory:       0,
+			DefaultCores:        0,
+			DefaultDCUNum:       1,
+			DeviceSplitCount:    4,
+			DeviceMemoryScaling: 1,
+			DeviceCoreScaling:   1,
 		},
 	}
 }

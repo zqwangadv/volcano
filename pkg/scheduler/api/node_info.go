@@ -21,6 +21,7 @@ import (
 	"strconv"
 	"sync/atomic"
 	"time"
+	vdcu "volcano.sh/volcano/pkg/scheduler/api/devices/hygon"
 
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/klog/v2"
@@ -378,6 +379,12 @@ func (ni *NodeInfo) setNodeOthersResource(node *v1.Node) {
 			ignored_list = append(ignored_list, devices.GetIgnoredDevices()...)
 		}
 	}
+
+	if vdcu.HygonHAMiDCUEnable {
+		ni.Others[vdcu.DeviceName] = vdcu.NewDCUDevices(ni.Name, node)
+		ignored_list = append(ignored_list, vdcu.NewDCUDevices(ni.Name, node).GetIgnoredDevices()...)
+	}
+
 	klog.V(5).Infof("ignored_list is %v", ignored_list)
 	IgnoredDevicesList.AppendList(
 		ignored_list,
@@ -560,6 +567,13 @@ func (ni *NodeInfo) addResource(pod *v1.Pod) {
 			}
 		}
 	}
+	if vdcu.HygonHAMiDCUEnable {
+		if other, exists := ni.Others[vdcu.DeviceName]; exists {
+			if devices, ok := other.(Devices); ok {
+				devices.AddResource(pod)
+			}
+		}
+	}
 }
 
 // subResource is used to subtract sharable devices
@@ -591,6 +605,13 @@ func (ni *NodeInfo) subResource(pod *v1.Pod) {
 				if devices, ok := other.(Devices); ok {
 					devices.SubResource(pod)
 				}
+			}
+		}
+	}
+	if vdcu.HygonHAMiDCUEnable {
+		if other, exists := ni.Others[vdcu.DeviceName]; exists {
+			if devices, ok := other.(Devices); ok {
+				devices.SubResource(pod)
 			}
 		}
 	}

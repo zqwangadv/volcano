@@ -22,6 +22,7 @@ import (
 	"math"
 	"reflect"
 	"sync"
+	vdcu "volcano.sh/volcano/pkg/scheduler/api/devices/hygon"
 
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/klog/v2"
@@ -49,6 +50,8 @@ const (
 
 	AscendMindClusterVNPU = "deviceshare.AscendMindClusterVNPUEnable"
 	AscendHAMiVNPUEnable  = "deviceshare.AscendHAMiVNPUEnable"
+
+	HygonHAMiVDCUEnable = "deviceshare.HygonHAMiVDCUEnable"
 
 	SchedulePolicyArgument = "deviceshare.SchedulePolicy"
 	ScheduleWeight         = "deviceshare.ScheduleWeight"
@@ -89,6 +92,7 @@ func enablePredicate(dsp *deviceSharePlugin) {
 	args.GetBool(&vgpu.VGPUEnable, VGPUEnable)
 	args.GetBool(&vnpu.AscendMindClusterVNPUEnable, AscendMindClusterVNPU)
 	args.GetBool(&hami.AscendHAMiVNPUEnable, AscendHAMiVNPUEnable)
+	args.GetBool(&vdcu.HygonHAMiDCUEnable, HygonHAMiVDCUEnable)
 
 	gpushare.NodeLockEnable = nodeLockEnable
 	vgpu.NodeLockEnable = nodeLockEnable
@@ -128,6 +132,9 @@ func registerDevices() {
 				klog.V(3).Infof("register device %s", vnpu.CommonWord)
 				api.RegisterDevice(vnpu.CommonWord)
 			}
+		}
+		if vdcu.HygonHAMiDCUEnable {
+			api.RegisterDevice(vdcu.DeviceName)
 		}
 	})
 }
