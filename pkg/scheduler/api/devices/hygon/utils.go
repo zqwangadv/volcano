@@ -293,7 +293,7 @@ func checkNodeDCUSharingPredicateAndScore(pod *v1.Pod, dssnap *DCUDevices, repli
 			if val.MemPercentagereq != 101 {
 				memreqForCard = uint(float64(ds.Device[i].Memory) * float64(val.MemPercentagereq) / 100.0)
 			} else {
-				memreqForCard = uint(val.Memreq * 1023)
+				memreqForCard = uint(val.Memreq * int32(getConfig().DeviceMemoryScaling))
 			}
 			if int(ds.Device[i].Memory)-int(ds.Device[i].UsedMem) < int(memreqForCard) {
 				continue

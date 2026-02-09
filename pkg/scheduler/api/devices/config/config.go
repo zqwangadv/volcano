@@ -157,7 +157,7 @@ func GetDefaultDevicesConfig() *Config {
 			DefaultCores:        0,
 			DefaultDCUNum:       1,
 			DeviceSplitCount:    4,
-			DeviceMemoryScaling: 1,
+			DeviceMemoryScaling: 1023,
 			DeviceCoreScaling:   1,
 		},
 	}
