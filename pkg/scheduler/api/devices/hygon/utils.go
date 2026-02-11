@@ -274,14 +274,63 @@ func checkNodeDCUSharingPredicateAndScore(pod *v1.Pod, dssnap *DCUDevices, repli
 	} else {
 		ds = dssnap
 	}
+
+	// Select best card for exclusive request
+	topologyInfo, err := GetTopologyInfo(dssnap.Name)
+	if err != nil && topologyInfo == nil {
+		klog.V(3).Infof("No DCU topology configmap found %v", err)
+	}
+
 	ctrdevs := []ContainerDevices{}
 	for _, val := range ctrReq {
 		devs := []ContainerDevice{}
+		var allocatedIdx, preAllocatedIdx []int
+		var filterTopologyInfo *Topology
+
 		if int(val.Nums) > len(ds.Device) {
-			return false, []ContainerDevices{}, 0, fmt.Errorf("no enough gpu cards on node %s", ds.Name)
+			return false, []ContainerDevices{}, 0, fmt.Errorf("no enough dcu cards on node %s", ds.Name)
 		}
 		klog.V(3).InfoS("Allocating device for container", "request", val)
 
+		if _, ok := pod.Annotations[DCUInUseUUID]; ok {
+			goto loop
+		}
+
+		// Deal with exclusive request
+		if val.MemPercentagereq == 100 && val.Coresreq == 100 && topologyInfo != nil {
+			for i := len(ds.Device) - 1; i >= 0; i-- {
+				if ds.Device[i].UsedCore > 0 || ds.Device[i].UsedMem > 0 {
+					allocatedIdx = append(allocatedIdx, ds.Device[i].ID)
+				}
+			}
+			filterTopologyInfo = FilterTopologyByAllocated(topologyInfo, allocatedIdx)
+			preAllocatedIdx = SelectBestDevices(filterTopologyInfo, int(val.Nums))
+			if len(preAllocatedIdx) == 0 {
+				return false, []ContainerDevices{}, 0, fmt.Errorf("no enough dcu cards on node %s for topology select", ds.Name)
+			}
+
+			for i, _ := range preAllocatedIdx {
+				if !checkType(pod.Annotations, *ds.Device[i], val) {
+					klog.Errorln("failed checktype", ds.Device[i].Type, val.Type)
+					return false, []ContainerDevices{}, 0, fmt.Errorf("failed checktype", ds.Device[i].Type, val.Type)
+				}
+
+				_, uuid := ds.TryAddPod(ds.Device[i], uint(val.Memreq), uint(val.Coresreq))
+				klog.V(3).Info("fitted uuid: ", uuid)
+				devs = append(devs, ContainerDevice{
+					UUID:      uuid,
+					Type:      val.Type,
+					Usedmem:   uint(val.Memreq),
+					Usedcores: uint(val.Coresreq),
+				})
+				score += binpackMultiplier * float64(val.Nums)
+			}
+
+			ctrdevs = append(ctrdevs, devs)
+			continue
+		}
+
+	loop:
 		for i := len(ds.Device) - 1; i >= 0; i-- {
 			klog.V(3).InfoS("Scoring pod request", "memReq", val.Memreq, "memPercentageReq", val.MemPercentagereq, "coresReq", val.Coresreq, "Nums", val.Nums, "Index", i, "ID", ds.Device[i].ID)
 			klog.V(3).InfoS("Current Device", "Index", i, "TotalMemory", ds.Device[i].Memory, "UsedMemory", ds.Device[i].UsedMem, "UsedCores", ds.Device[i].UsedCore, "replicate", replicate)
@@ -418,4 +467,128 @@ func getConfig() config.HygonConfig {
 		return config.GetConfig().HygonConfig
 	}
 	return config.GetDefaultDevicesConfig().HygonConfig
+}
+
+func ParseTopologyInfoConfigMap(cm *v1.ConfigMap) (map[string]*Topology, error) {
+	result := make(map[string]*Topology)
+
+	for _, raw := range cm.Data {
+		lines := strings.Split(raw, "\n")
+		for _, line := range lines {
+			line = strings.TrimSpace(line)
+			if line == "" || strings.HasPrefix(line, "#") {
+				continue
+			}
+
+			parts := strings.SplitN(line, ":", 2)
+			if len(parts) != 2 {
+				return nil, fmt.Errorf("invalid line: %s", line)
+			}
+
+			nodeName := strings.TrimSpace(parts[0])
+			jsonStr := strings.TrimSpace(parts[1])
+
+			var topo Topology
+			if err := json.Unmarshal([]byte(jsonStr), &topo); err != nil {
+				return nil, fmt.Errorf("node %s parse error: %w", nodeName, err)
+			}
+
+			result[nodeName] = &topo
+		}
+	}
+	return result, nil
+}
+
+func GetTopologyInfo(nodeName string) (*Topology, error) {
+	cm, err := devices.GetClient().CoreV1().ConfigMaps("kube-system").
+		Get(context.Background(), "dcu-topology-info", metav1.GetOptions{})
+	if err != nil {
+		return nil, err
+	}
+
+	topos, err := ParseTopologyInfoConfigMap(cm)
+	if err != nil {
+		return nil, err
+	}
+
+	if topo, ok := topos[nodeName]; ok {
+		return topo, nil
+	}
+	return nil, nil
+}
+
+func FilterTopologyByAllocated(topo *Topology, allocatedIDs []int) *Topology {
+	if topo == nil || len(topo.Matrix) == 0 {
+		return topo
+	}
+
+	// Build the allocated set
+	alloc := make(map[int]struct{}, len(allocatedIDs))
+	for _, id := range allocatedIDs {
+		alloc[id] = struct{}{}
+	}
+
+	// Find the row indices of the matrix that need to be retained.
+	keepIdx := make([]int, 0, len(topo.Matrix))
+	for i := 0; i < len(topo.Matrix); i++ {
+		devID := topo.Matrix[i][i].SrcDvInd
+		if _, ok := alloc[devID]; !ok {
+			keepIdx = append(keepIdx, i)
+		}
+	}
+
+	// Construct a new matrix
+	newMatrix := make([][]Link, len(keepIdx))
+	for i, oldI := range keepIdx {
+		newMatrix[i] = make([]Link, len(keepIdx))
+		for j, oldJ := range keepIdx {
+			newMatrix[i][j] = topo.Matrix[oldI][oldJ]
+		}
+	}
+
+	return &Topology{
+		Matrix: newMatrix,
+	}
+}
+
+func SelectBestDevices(topo *Topology, k int) []int {
+	n := len(topo.Matrix)
+	if k <= 0 || k > n {
+		return nil
+	}
+
+	bestScore := -1 << 30
+	var bestIdx []int
+
+	var dfs func(start int, chosen []int, score int)
+	dfs = func(start int, chosen []int, score int) {
+		if len(chosen) == k {
+			if score > bestScore {
+				bestScore = score
+				bestIdx = append([]int{}, chosen...)
+			}
+			return
+		}
+
+		if n-start < k-len(chosen) {
+			return
+		}
+
+		for i := start; i < n; i++ {
+			add := 0
+			for _, j := range chosen {
+				add += topo.Matrix[j][i].Weight
+			}
+			dfs(i+1, append(chosen, i), score+add)
+		}
+	}
+
+	dfs(0, nil, 0)
+
+	// Convert to the real device index (SrcDvInd)
+	result := make([]int, 0, k)
+	for _, idx := range bestIdx {
+		result = append(result, topo.Matrix[idx][idx].SrcDvInd)
+	}
+	return result
 }
