@@ -43,8 +43,8 @@ const (
 )
 
 var (
-	HygonHAMiDCUEnable bool
-	NodeLockEnable     bool
+	HygonVDCUEnable bool
+	NodeLockEnable  bool
 )
 
 type ContainerDevice struct {
@@ -56,3 +56,17 @@ type ContainerDevice struct {
 }
 
 type ContainerDevices []ContainerDevice
+
+type Link struct {
+	SrcDvInd    int    `json:"SrcDvInd"`
+	DstDvInd    int    `json:"DstDvInd"`
+	RemoteBdfID int    `json:"RemoteBdfID"`
+	LinkType    string `json:"LinkType"`
+	Weight      int    `json:"Weight"`
+	Hops        int    `json:"Hops"`
+}
+
+type Topology struct {
+	DeviceCount int      `json:"DeviceCount"`
+	Matrix      [][]Link `json:"Matrix"`
+}

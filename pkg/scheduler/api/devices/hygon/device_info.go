@@ -229,7 +229,7 @@ func (ds *DCUDevices) SubResource(pod *v1.Pod) {
 }
 
 func (ds *DCUDevices) HasDeviceRequest(pod *v1.Pod) bool {
-	if HygonHAMiDCUEnable && checkVDCUResourcesInPod(pod) {
+	if HygonVDCUEnable && checkVDCUResourcesInPod(pod) {
 		return true
 	}
 	return false
@@ -240,7 +240,7 @@ func (ds *DCUDevices) Release(kubeClient kubernetes.Interface, pod *v1.Pod) erro
 }
 
 func (ds *DCUDevices) FilterNode(pod *v1.Pod, schedulePolicy string) (int, string, error) {
-	if HygonHAMiDCUEnable {
+	if HygonVDCUEnable {
 		klog.V(4).Infoln("hami-vdcu DeviceSharing starts filtering pods", pod.Name)
 		fit, _, score, err := checkNodeDCUSharingPredicateAndScore(pod, ds, true, schedulePolicy)
 		if err != nil || !fit {
@@ -254,7 +254,7 @@ func (ds *DCUDevices) FilterNode(pod *v1.Pod, schedulePolicy string) (int, strin
 }
 
 func (ds *DCUDevices) Allocate(kubeClient kubernetes.Interface, pod *v1.Pod) error {
-	if HygonHAMiDCUEnable {
+	if HygonVDCUEnable {
 		klog.V(4).Infoln("hami-vdcu DeviceSharing:Into AllocateToPod", pod.Name)
 		fit, device, _, err := checkNodeDCUSharingPredicateAndScore(pod, ds, false, "")
 		if err != nil || !fit {
