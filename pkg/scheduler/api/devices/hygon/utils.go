@@ -472,29 +472,12 @@ func getConfig() config.HygonConfig {
 func ParseTopologyInfoConfigMap(cm *v1.ConfigMap) (map[string]*Topology, error) {
 	result := make(map[string]*Topology)
 
-	for _, raw := range cm.Data {
-		lines := strings.Split(raw, "\n")
-		for _, line := range lines {
-			line = strings.TrimSpace(line)
-			if line == "" || strings.HasPrefix(line, "#") {
-				continue
-			}
-
-			parts := strings.SplitN(line, ":", 2)
-			if len(parts) != 2 {
-				return nil, fmt.Errorf("invalid line: %s", line)
-			}
-
-			nodeName := strings.TrimSpace(parts[0])
-			jsonStr := strings.TrimSpace(parts[1])
-
-			var topo Topology
-			if err := json.Unmarshal([]byte(jsonStr), &topo); err != nil {
-				return nil, fmt.Errorf("node %s parse error: %w", nodeName, err)
-			}
-
-			result[nodeName] = &topo
+	for nodeName, topologyJSON := range cm.Data {
+		var topo Topology
+		if err := json.Unmarshal([]byte(topologyJSON), &topo); err != nil {
+			return nil, fmt.Errorf("node %s parse failed: %w", nodeName, err)
 		}
+		result[nodeName] = &topo
 	}
 	return result, nil
 }
