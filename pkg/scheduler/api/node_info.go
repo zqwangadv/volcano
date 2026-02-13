@@ -380,7 +380,7 @@ func (ni *NodeInfo) setNodeOthersResource(node *v1.Node) {
 		}
 	}
 
-	if vdcu.HygonHAMiDCUEnable {
+	if vdcu.HygonVDCUEnable {
 		ni.Others[vdcu.DeviceName] = vdcu.NewDCUDevices(ni.Name, node)
 		ignored_list = append(ignored_list, vdcu.NewDCUDevices(ni.Name, node).GetIgnoredDevices()...)
 	}
@@ -567,7 +567,7 @@ func (ni *NodeInfo) addResource(pod *v1.Pod) {
 			}
 		}
 	}
-	if vdcu.HygonHAMiDCUEnable {
+	if vdcu.HygonVDCUEnable {
 		if other, exists := ni.Others[vdcu.DeviceName]; exists {
 			if devices, ok := other.(Devices); ok {
 				devices.AddResource(pod)
@@ -608,7 +608,7 @@ func (ni *NodeInfo) subResource(pod *v1.Pod) {
 			}
 		}
 	}
-	if vdcu.HygonHAMiDCUEnable {
+	if vdcu.HygonVDCUEnable {
 		if other, exists := ni.Others[vdcu.DeviceName]; exists {
 			if devices, ok := other.(Devices); ok {
 				devices.SubResource(pod)
