@@ -309,23 +309,22 @@ func checkNodeDCUSharingPredicateAndScore(pod *v1.Pod, dssnap *DCUDevices, repli
 				return false, []ContainerDevices{}, 0, fmt.Errorf("no enough dcu cards on node %s for topology select", ds.Name)
 			}
 
-			for i, _ := range preAllocatedIdx {
+			for _, i := range preAllocatedIdx {
 				if !checkType(pod.Annotations, *ds.Device[i], val) {
 					klog.Errorln("failed checktype", ds.Device[i].Type, val.Type)
 					return false, []ContainerDevices{}, 0, fmt.Errorf("failed checktype", ds.Device[i].Type, val.Type)
 				}
 
-				_, uuid := ds.TryAddPod(ds.Device[i], uint(val.Memreq), uint(val.Coresreq))
+				_, uuid := ds.TryAddPod(ds.Device[i], uint(float64(ds.Device[i].Memory)*float64(val.MemPercentagereq)/100.0), uint(val.Coresreq))
 				klog.V(3).Info("fitted uuid: ", uuid)
 				devs = append(devs, ContainerDevice{
 					UUID:      uuid,
 					Type:      val.Type,
-					Usedmem:   uint(val.Memreq),
+					Usedmem:   uint(float64(ds.Device[i].Memory) * float64(val.MemPercentagereq) / 100.0),
 					Usedcores: uint(val.Coresreq),
 				})
-				score += binpackMultiplier * float64(val.Nums)
+				score += DCUScore(schedulePolicy, ds.Device[i])
 			}
-
 			ctrdevs = append(ctrdevs, devs)
 			continue
 		}
