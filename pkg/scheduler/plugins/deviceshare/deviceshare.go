@@ -51,7 +51,7 @@ const (
 	AscendMindClusterVNPU = "deviceshare.AscendMindClusterVNPUEnable"
 	AscendHAMiVNPUEnable  = "deviceshare.AscendHAMiVNPUEnable"
 
-	HygonHAMiVDCUEnable = "deviceshare.VDCUEnable"
+	HygonVDCUEnable = "deviceshare.VDCUEnable"
 
 	SchedulePolicyArgument = "deviceshare.SchedulePolicy"
 	ScheduleWeight         = "deviceshare.ScheduleWeight"
@@ -92,7 +92,7 @@ func enablePredicate(dsp *deviceSharePlugin) {
 	args.GetBool(&vgpu.VGPUEnable, VGPUEnable)
 	args.GetBool(&vnpu.AscendMindClusterVNPUEnable, AscendMindClusterVNPU)
 	args.GetBool(&hami.AscendHAMiVNPUEnable, AscendHAMiVNPUEnable)
-	args.GetBool(&vdcu.HygonVDCUEnable, HygonHAMiVDCUEnable)
+	args.GetBool(&vdcu.HygonVDCUEnable, HygonVDCUEnable)
 
 	gpushare.NodeLockEnable = nodeLockEnable
 	vgpu.NodeLockEnable = nodeLockEnable
