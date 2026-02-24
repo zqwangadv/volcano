@@ -165,12 +165,14 @@ func (ds *DCUDevices) addResource(annotations map[string]string, pod *v1.Pod) {
 		klog.Errorf("pod %s has no annotation hami.io/dcu-devices-allocated", pod.Name)
 		return
 	}
+
+	ds.addToPodMap(annotations, pod)
+
 	podDev := decodePodDevices(ids)
 	for _, val := range podDev {
 		for _, deviceused := range val {
 			for index, gsdevice := range ds.Device {
 				if strings.Contains(deviceused.UUID, gsdevice.UUID) {
-					ds.addToPodMap(annotations, pod)
 					ds.AddPodMetrics(index, string(pod.UID), pod.Name)
 				}
 			}
