@@ -6,10 +6,9 @@
 
 | 项目             | 要求                  |
 | ---------------- |---------------------|
-| Kubernetes       | >= 1.20             |
-| Volcano          | >= 1.9              |
+| Kubernetes       | \>= 1.20            |
 | 容器运行时       | containerd / Docker |
-| DCU 驱动         | >=6.3.8             |
+| DCU 驱动         | \>=6.3.8            |
 
 节点需提前完成 DCU 驱动与运行时环境安装，并确认以下命令可正常执行：
 
@@ -36,9 +35,9 @@ hy-smi virtual -show-device-info
 +--------+---------+
          |
          v
-+--------------------------+
++-------------------+
 | DCU Device Plugin   |
-+--------+-----------------+
++--------+----------+
          |
          v
 +--------------------------+
@@ -142,6 +141,7 @@ allocatable:
   hygon.com/dcumem: "512"
   hygon.com/dcucores: "800"
 ```
+hygon.com/dcunum 标识可用于vDCU切分的最大数量，hygon.com/dcumem 标识可用于vDCU切分的最大显存（按照GiB单位计数），hygon.com/dcucores 标识可用于vDCU切分的最大算力（按照百分比计数）。
 ## 8. vDCU 作业示例
 
 ```yaml
@@ -157,11 +157,10 @@ spec:
     command: ["bash", "-c", "hy-smi virtual -show-device-info && sleep 3600"]
     resources:
       limits:
-        hygon.com/dcunum: 1
-        hygon.com/dcumem: 2
-        hygon.com/dcucores: 50
+        hygon.com/dcunum: 1     # 申请1个vDCU
+        hygon.com/dcumem: 2     # 指定vDCU显存为2GiB
+        hygon.com/dcucores: 50  # 指定vDCU算力为整卡的50%
 ```
-
 提交：
 
 ```bash
@@ -187,9 +186,9 @@ Device 0:
 
 ---
 
-## 10. 常见问题与注意事项
+## 9. 常见问题与注意事项
 
-### 10.1 DCU 虚拟化限制
+### 9.1 DCU 虚拟化限制
 
 - 每个容器最多申请 **1 张 vDCU**
 - 不支持在 `initContainer` 中使用 vDCU
@@ -197,14 +196,14 @@ Device 0:
 
 ---
 
-### 10.2 调度策略建议
+### 9.2 调度策略建议
 
 - 推荐使用 `binpack` 提高单卡利用率
 - Volcano gang scheduling 可与 vDCU 混合使用
 
 ---
 
-### 10.3 资源未注册排查
+### 9.3 资源未注册排查
 
 ```bash
 kubectl logs -n kube-system <dcu-device-plugin-pod>
