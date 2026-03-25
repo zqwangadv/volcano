@@ -256,7 +256,7 @@ type SubGroupPolicySpec struct {
 	LabelSelector *metav1.LabelSelector `json:"labelSelector,omitempty" protobuf:"bytes,6,opt,name=labelSelector"`
 
 	// MatchLabelKeys: A label-based grouping configuration field for Pods, defining filtering rules for grouping label keys
-	// Core function: Refine grouping of Pods that meet LabelSelector criteria by label attributes, with the following rules and constraints:
+	// Cores function: Refine grouping of Pods that meet LabelSelector criteria by label attributes, with the following rules and constraints:
 	// 1. Scope: Only applies to Pods matching the predefined LabelSelector
 	// 2. Grouping rule: Specify one or more label keys; Pods containing the target label keys with exactly the same corresponding label values are grouped together
 	// 3. Policy constraint: Pods in the same group follow a unified NetworkTopology policy to achieve group-level network behavior governance

@@ -31,7 +31,10 @@ import (
 	"k8s.io/klog/v2"
 )
 
-const MaxLockRetry = 5
+const (
+	MaxLockRetry = 5
+	NodeLockSep  = ","
+)
 
 var kubeClient kubernetes.Interface
 
@@ -108,7 +111,49 @@ func setNodeLock(nodeName string, lockName string) error {
 	return nil
 }
 
+func setDCUNodeLock(nodeName string, lockName string, lockValue string) error {
+	ctx := context.Background()
+	node, err := kubeClient.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
+	if err != nil {
+		return err
+	}
+	if _, ok := node.ObjectMeta.Annotations[lockName]; ok {
+		klog.V(3).Infof("node %s is locked", nodeName)
+		return fmt.Errorf("node %s is locked", nodeName)
+	}
+	updateFunc := func(annotations map[string]string) {
+		annotations[lockName] = lockValue
+	}
+	err = updateNodeAnnotations(ctx, node, updateFunc)
+	if err != nil {
+		return fmt.Errorf("setNodeLock exceeds retry count %d", MaxLockRetry)
+	}
+	klog.InfoS("Node lock set", "node", nodeName)
+	return nil
+}
+
 func ReleaseNodeLock(nodeName string, lockName string) error {
+	ctx := context.Background()
+	node, err := kubeClient.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
+	if err != nil {
+		return err
+	}
+	if _, ok := node.ObjectMeta.Annotations[lockName]; !ok {
+		klog.V(3).InfoS("Node lock not set", "node", nodeName)
+		return nil
+	}
+	updateFunc := func(annotations map[string]string) {
+		delete(annotations, lockName)
+	}
+	err = updateNodeAnnotations(ctx, node, updateFunc)
+	if err != nil {
+		return fmt.Errorf("releaseNodeLock exceeds retry count %d", MaxLockRetry)
+	}
+	klog.InfoS("Node lock released", "node", nodeName)
+	return nil
+}
+
+func ReleaseDCUNodeLock(nodeName string, lockName string, lockValue string) error {
 	ctx := context.Background()
 	node, err := kubeClient.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
 	if err != nil {
@@ -153,4 +198,36 @@ func LockNode(nodeName string, lockName string) error {
 		return setNodeLock(nodeName, lockName)
 	}
 	return fmt.Errorf("node %s has been locked within 5 minutes", nodeName)
+}
+func LockDCUNode(nodeName string, lockName string, lockValue string) error {
+	ctx := context.Background()
+	node, err := kubeClient.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
+	if err != nil {
+		return err
+	}
+	if _, ok := node.ObjectMeta.Annotations[lockName]; !ok {
+		return setDCUNodeLock(nodeName, lockName, lockValue)
+	}
+	lockTime, err := time.Parse(time.RFC3339, node.ObjectMeta.Annotations[lockName])
+	if err != nil {
+		return err
+	}
+	if time.Since(lockTime) > time.Minute*5 {
+		klog.V(3).InfoS("Node lock expired", "node", nodeName, "lockTime", lockTime)
+		err = ReleaseNodeLock(nodeName, lockName)
+		if err != nil {
+			klog.ErrorS(err, "Failed to release node lock", "node", nodeName)
+			return err
+		}
+		return setDCUNodeLock(nodeName, lockName, lockValue)
+	}
+	return fmt.Errorf("node %s has been locked within 5 minutes", nodeName)
+}
+
+func GenerateNodeLockKeyByPod(pods *v1.Pod) string {
+	if pods == nil {
+		return time.Now().Format(time.RFC3339)
+	}
+	ns, name := pods.Namespace, pods.Name
+	return fmt.Sprintf("%s%s%s%s%s", time.Now().Format(time.RFC3339), NodeLockSep, ns, NodeLockSep, name)
 }
