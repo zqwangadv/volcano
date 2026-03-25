@@ -22,6 +22,7 @@ import (
 	"math"
 	"reflect"
 	"sync"
+
 	vdcu "volcano.sh/volcano/pkg/scheduler/api/devices/hygon"
 
 	v1 "k8s.io/api/core/v1"
@@ -97,9 +98,11 @@ func enablePredicate(dsp *deviceSharePlugin) {
 	gpushare.NodeLockEnable = nodeLockEnable
 	vgpu.NodeLockEnable = nodeLockEnable
 	hami.NodeLockEnable = nodeLockEnable
+	vdcu.NodeLockEnable = nodeLockEnable
 
 	args.GetString(&dsp.schedulePolicy, SchedulePolicyArgument)
 	args.GetInt(&dsp.scheduleWeight, ScheduleWeight)
+	vdcu.SchedulePolicyArgument = dsp.schedulePolicy
 
 	if gpushare.GpuSharingEnable && gpushare.GpuNumberEnable {
 		klog.Fatal("can not define true in both gpu sharing and gpu number")

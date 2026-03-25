@@ -17,13 +17,14 @@ limitations under the License.
 package vdcu
 
 import (
+	"strconv"
+	"strings"
+	"time"
+
 	"github.com/pkg/errors"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/klog/v2"
-	"strconv"
-	"strings"
-	"time"
 
 	"volcano.sh/volcano/pkg/scheduler/api/devices"
 	deviceconfig "volcano.sh/volcano/pkg/scheduler/api/devices/config"
@@ -49,6 +50,8 @@ type DCUDevice struct {
 	Memory uint
 	// max sharing number
 	Number uint
+	// max core number
+	Cores uint
 	// type of this number
 	Type string
 	// Health condition of this DCU
@@ -245,6 +248,7 @@ func (ds *DCUDevices) FilterNode(pod *v1.Pod, schedulePolicy string) (int, strin
 	if HygonVDCUEnable {
 		klog.V(4).Infoln("hami-vdcu DeviceSharing starts filtering pods", pod.Name)
 		fit, _, score, err := checkNodeDCUSharingPredicateAndScore(pod, ds, true, schedulePolicy)
+
 		if err != nil || !fit {
 			klog.ErrorS(err, "Failed to fitler node to vdcu task", "pod", pod.Name)
 			return devices.Unschedulable, "hami-vdcu DeviceSharing error", err
@@ -258,14 +262,16 @@ func (ds *DCUDevices) FilterNode(pod *v1.Pod, schedulePolicy string) (int, strin
 func (ds *DCUDevices) Allocate(kubeClient kubernetes.Interface, pod *v1.Pod) error {
 	if HygonVDCUEnable {
 		klog.V(4).Infoln("hami-vdcu DeviceSharing:Into AllocateToPod", pod.Name)
-		fit, device, _, err := checkNodeDCUSharingPredicateAndScore(pod, ds, false, "")
+		fit, device, _, err := checkNodeDCUSharingPredicateAndScore(pod, ds, false, SchedulePolicyArgument)
 		if err != nil || !fit {
 			klog.ErrorS(err, "Failed to allocate vdcu task", "pod", pod.Name)
 			return err
 		}
+		lockValue := nodelock.GenerateNodeLockKeyByPod(pod)
 		if NodeLockEnable {
+			klog.InfoS("Node lock enabled", "node", ds.Name)
 			nodelock.UseClient(kubeClient)
-			err = nodelock.LockNode(ds.Name, DeviceName)
+			err = nodelock.LockDCUNode(ds.Name, DeviceName, lockValue)
 			if err != nil {
 				return errors.Errorf("node %s locked for %s hami-vdcu lockname %s", ds.Name, pod.Name, err.Error())
 			}
@@ -286,15 +292,21 @@ func (ds *DCUDevices) Allocate(kubeClient kubernetes.Interface, pod *v1.Pod) err
 		if err != nil {
 			return err
 		}
-
+		if NodeLockEnable {
+			nodelock.ReleaseDCUNodeLock(ds.Name, DeviceName, lockValue)
+		}
 		klog.V(3).Infoln("DeviceSharing:Allocate Success")
 	}
 	return nil
 }
 
-func (ds *DCUDevices) TryAddPod(device *DCUDevice, card uint, u uint) (bool, string) {
-	device.UsedNum++
-	device.UsedMem += card
-	device.UsedCore += u
-	return true, device.UUID
+func (ds *DCUDevices) TryAddPod(device *DCUDevice, reqmem uint, reqcores uint) (bool, string) {
+
+	if device.UsedNum+1 <= device.Number && device.UsedCore+reqcores <= device.Cores && device.UsedMem+reqmem <= device.Memory {
+		device.UsedNum++
+		device.UsedMem += reqmem
+		device.UsedCore += reqcores
+		return true, device.UUID
+	}
+	return false, device.UUID
 }

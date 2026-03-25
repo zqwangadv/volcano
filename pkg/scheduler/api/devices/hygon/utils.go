@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -50,14 +51,17 @@ func decodeNodeDevices(name, str string) *DCUDevices {
 				klog.Error("wrong Node DCU info: ", val)
 				return nil
 			}
+
 			count, _ := strconv.Atoi(items[1])
 			devmem, _ := strconv.Atoi(items[2])
+			devcores, _ := strconv.Atoi(items[3])
 			health, _ := strconv.ParseBool(items[6])
 			i := DCUDevice{
 				ID:     index,
 				Node:   name,
 				UUID:   items[0],
 				Number: uint(count),
+				Cores:  uint(devcores),
 				Memory: uint(devmem),
 				Type:   items[4],
 				PodMap: make(map[string]*DCUUsage),
@@ -248,6 +252,7 @@ func getDCUDeviceSnapShot(snap *DCUDevices) *DCUDevices {
 				UsedNum:  val.UsedNum,
 				UsedMem:  val.UsedMem,
 				UsedCore: val.UsedCore,
+				Cores:    val.Cores,
 			}
 			klog.V(4).Infoln("getDCUDeviceSnapShot:", ret.Device[index].UsedMem, val.UsedMem, ret.Device[index].UsedCore, val.UsedCore)
 		}
@@ -282,46 +287,46 @@ func checkNodeDCUSharingPredicateAndScore(pod *v1.Pod, dssnap *DCUDevices, repli
 	}
 
 	ctrdevs := []ContainerDevices{}
-	for _, val := range ctrReq {
+	for _, request := range ctrReq {
 		devs := []ContainerDevice{}
 		var allocatedIdx, preAllocatedIdx []int
 		var filterTopologyInfo *Topology
 
-		if int(val.Nums) > len(ds.Device) {
+		if int(request.Nums) > len(ds.Device) {
 			return false, []ContainerDevices{}, 0, fmt.Errorf("no enough dcu cards on node %s", ds.Name)
 		}
-		klog.V(3).InfoS("Allocating device for container", "request", val)
+		klog.V(3).InfoS("Allocating device for container", "request", request)
 
 		if _, ok := pod.Annotations[DCUInUseUUID]; ok {
 			goto loop
 		}
 
 		// Deal with exclusive request
-		if val.MemPercentagereq == 100 && val.Coresreq == 100 && topologyInfo != nil {
+		if request.MemPercentagereq == 100 && request.Coresreq == 100 && topologyInfo != nil {
 			for i := len(ds.Device) - 1; i >= 0; i-- {
 				if ds.Device[i].UsedCore > 0 || ds.Device[i].UsedMem > 0 {
 					allocatedIdx = append(allocatedIdx, ds.Device[i].ID)
 				}
 			}
 			filterTopologyInfo = FilterTopologyByAllocated(topologyInfo, allocatedIdx)
-			preAllocatedIdx = SelectBestDevices(filterTopologyInfo, int(val.Nums))
+			preAllocatedIdx = SelectBestDevices(filterTopologyInfo, int(request.Nums))
 			if len(preAllocatedIdx) == 0 {
 				return false, []ContainerDevices{}, 0, fmt.Errorf("no enough dcu cards on node %s for topology select", ds.Name)
 			}
 
 			for _, i := range preAllocatedIdx {
-				if !checkType(pod.Annotations, *ds.Device[i], val) {
-					klog.Errorln("failed checktype", ds.Device[i].Type, val.Type)
-					return false, []ContainerDevices{}, 0, fmt.Errorf("failed checktype", ds.Device[i].Type, val.Type)
+				if !checkType(pod.Annotations, *ds.Device[i], request) {
+					klog.Errorln("failed checktype", ds.Device[i].Type, request.Type)
+					return false, []ContainerDevices{}, 0, fmt.Errorf("failed checktype", ds.Device[i].Type, request.Type)
 				}
 
-				_, uuid := ds.TryAddPod(ds.Device[i], uint(float64(ds.Device[i].Memory)*float64(val.MemPercentagereq)/100.0), uint(val.Coresreq))
+				_, uuid := ds.TryAddPod(ds.Device[i], uint(float64(ds.Device[i].Memory)*float64(request.MemPercentagereq)/100.0), uint(request.Coresreq))
 				klog.V(3).Info("fitted uuid: ", uuid)
 				devs = append(devs, ContainerDevice{
 					UUID:      uuid,
-					Type:      val.Type,
-					Usedmem:   uint(float64(ds.Device[i].Memory) * float64(val.MemPercentagereq) / 100.0),
-					Usedcores: uint(val.Coresreq),
+					Type:      request.Type,
+					Usedmem:   uint(float64(ds.Device[i].Memory) * float64(request.MemPercentagereq) / 100.0),
+					Usedcores: uint(request.Coresreq),
 				})
 				score += DCUScore(schedulePolicy, ds.Device[i])
 			}
@@ -330,35 +335,49 @@ func checkNodeDCUSharingPredicateAndScore(pod *v1.Pod, dssnap *DCUDevices, repli
 		}
 
 	loop:
-		for i := len(ds.Device) - 1; i >= 0; i-- {
-			klog.V(3).InfoS("Scoring pod request", "memReq", val.Memreq, "memPercentageReq", val.MemPercentagereq, "coresReq", val.Coresreq, "Nums", val.Nums, "Index", i, "ID", ds.Device[i].ID)
+		var deviceIndices []int
+		for i := 0; i < len(ds.Device); i++ {
+			deviceIndices = append(deviceIndices, i)
+		}
+		if schedulePolicy == binpackPolicy {
+			sort.Slice(deviceIndices, func(i, j int) bool {
+				return float64(ds.Device[deviceIndices[i]].UsedNum)/float64(ds.Device[deviceIndices[i]].Number)+
+					float64(ds.Device[deviceIndices[i]].UsedCore)/float64(ds.Device[deviceIndices[i]].Cores)+
+					float64(ds.Device[deviceIndices[i]].UsedMem)/float64(ds.Device[deviceIndices[i]].Memory) >
+					float64(ds.Device[deviceIndices[j]].UsedNum)/float64(ds.Device[deviceIndices[j]].Number)+
+						float64(ds.Device[deviceIndices[j]].UsedMem)/float64(ds.Device[deviceIndices[j]].Memory)+
+						float64(ds.Device[deviceIndices[j]].UsedCore)/float64(ds.Device[deviceIndices[j]].Cores)
+			})
+		}
+		for _, i := range deviceIndices {
+			klog.V(3).InfoS("Scoring pod request", "memReq", request.Memreq, "memPercentageReq", request.MemPercentagereq, "coresReq", request.Coresreq, "Nums", request.Nums, "Index", i, "ID", ds.Device[i].ID)
 			klog.V(3).InfoS("Current Device", "Index", i, "TotalMemory", ds.Device[i].Memory, "UsedMemory", ds.Device[i].UsedMem, "UsedCores", ds.Device[i].UsedCore, "replicate", replicate)
 			if ds.Device[i].Number <= uint(ds.Device[i].UsedNum) {
 				continue
 			}
 			memreqForCard := uint(0)
 			// if we have mempercentage request, we ignore the mem request for every cards
-			if val.MemPercentagereq != 101 {
-				memreqForCard = uint(float64(ds.Device[i].Memory) * float64(val.MemPercentagereq) / 100.0)
+			if request.MemPercentagereq != 101 {
+				memreqForCard = uint(float64(ds.Device[i].Memory) * float64(request.MemPercentagereq) / 100.0)
 			} else {
-				memreqForCard = uint(val.Memreq * int32(getConfig().DeviceMemoryScaling))
+				memreqForCard = uint(request.Memreq * int32(getConfig().DeviceMemoryScaling))
 			}
 			if int(ds.Device[i].Memory)-int(ds.Device[i].UsedMem) < int(memreqForCard) {
 				continue
 			}
-			if ds.Device[i].UsedCore+uint(val.Coresreq) > 100 {
+			if ds.Device[i].UsedCore+uint(request.Coresreq) > 100 {
 				continue
 			}
 			// Coresreq=100 indicates it want this card exclusively
-			if val.Coresreq == 100 && ds.Device[i].UsedNum > 0 {
+			if request.Coresreq == 100 && ds.Device[i].UsedNum > 0 {
 				continue
 			}
 			// You can't allocate core=0 job to an already full GPU
-			if ds.Device[i].UsedCore == 100 && val.Coresreq == 0 {
+			if ds.Device[i].UsedCore == 100 && request.Coresreq == 0 {
 				continue
 			}
-			if !checkType(pod.Annotations, *ds.Device[i], val) {
-				klog.Errorln("failed checktype", ds.Device[i].Type, val.Type)
+			if !checkType(pod.Annotations, *ds.Device[i], request) {
+				klog.Errorln("failed checktype", ds.Device[i].Type, request.Type)
 				continue
 			}
 			if !checkDCUUUID(pod.Annotations, ds.Device[i].UUID) {
@@ -366,30 +385,30 @@ func checkNodeDCUSharingPredicateAndScore(pod *v1.Pod, dssnap *DCUDevices, repli
 				continue
 			}
 
-			fit, uuid := ds.TryAddPod(ds.Device[i], memreqForCard, uint(val.Coresreq))
+			fit, uuid := ds.TryAddPod(ds.Device[i], memreqForCard, uint(request.Coresreq))
 
 			if !fit {
-				klog.V(3).Info(ds.Device[i].ID, "not fit")
+				klog.V(3).Info(ds.Device[i].ID, " not fit")
 				continue
 			}
 			//total += gs.Devices[i].Count
 			//free += node.Devices[i].Count - node.Devices[i].Used
-			if val.Nums > 0 {
-				val.Nums--
+			if request.Nums > 0 {
+				request.Nums--
 				klog.V(3).Info("fitted uuid: ", uuid)
 				devs = append(devs, ContainerDevice{
 					UUID:      uuid,
-					Type:      val.Type,
+					Type:      request.Type,
 					Usedmem:   memreqForCard,
-					Usedcores: uint(val.Coresreq),
+					Usedcores: uint(request.Coresreq),
 				})
 				score += DCUScore(schedulePolicy, ds.Device[i])
 			}
-			if val.Nums == 0 {
+			if request.Nums == 0 {
 				break
 			}
 		}
-		if val.Nums > 0 {
+		if request.Nums > 0 {
 			return false, []ContainerDevices{}, 0, fmt.Errorf("not enough dcu fitted on this node")
 		}
 		ctrdevs = append(ctrdevs, devs)
@@ -399,9 +418,12 @@ func checkNodeDCUSharingPredicateAndScore(pod *v1.Pod, dssnap *DCUDevices, repli
 
 func DCUScore(schedulePolicy string, device *DCUDevice) float64 {
 	var score float64
+	numScore := float32(device.UsedNum) / float32(device.Number)
+	coreScore := float32(device.UsedCore) / float32(device.Cores)
+	memScore := float32(device.UsedMem) / float32(device.Memory)
 	switch schedulePolicy {
 	case binpackPolicy:
-		score = binpackMultiplier * (float64(device.UsedMem) / float64(device.Memory))
+		score = float64(binpackMultiplier * (numScore + coreScore + memScore))
 	case spreadPolicy:
 		if device.UsedNum == 1 {
 			score = spreadMultiplier

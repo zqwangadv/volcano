@@ -18,7 +18,7 @@ package vdcu
 
 const (
 	// DeviceName used to indicate this device
-	DeviceName = "hamivdcu"
+	DeviceName = "hami.io/mutex.lock"
 
 	DCUInUseType                     = "hygon.com/use-dcutype"
 	DCUNoUseType                     = "hygon.com/nouse-dcutype"
@@ -43,8 +43,9 @@ const (
 )
 
 var (
-	HygonVDCUEnable bool
-	NodeLockEnable  bool
+	HygonVDCUEnable        bool
+	NodeLockEnable         bool
+	SchedulePolicyArgument string
 )
 
 type ContainerDevice struct {
