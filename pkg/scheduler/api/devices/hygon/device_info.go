@@ -17,12 +17,14 @@ limitations under the License.
 package vdcu
 
 import (
+	"context"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/pkg/errors"
 	v1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/klog/v2"
 
@@ -248,6 +250,7 @@ func (ds *DCUDevices) FilterNode(pod *v1.Pod, schedulePolicy string) (int, strin
 	if HygonVDCUEnable {
 		klog.V(4).Infoln("hami-vdcu DeviceSharing starts filtering pods", pod.Name)
 		fit, _, score, err := checkNodeDCUSharingPredicateAndScore(pod, ds, true, schedulePolicy)
+		klog.V(5).Infof("schedulePolicy:%s , FilterNode-ds: %+v , score: %+v", schedulePolicy, ds, score)
 
 		if err != nil || !fit {
 			klog.ErrorS(err, "Failed to fitler node to vdcu task", "pod", pod.Name)
@@ -261,8 +264,18 @@ func (ds *DCUDevices) FilterNode(pod *v1.Pod, schedulePolicy string) (int, strin
 
 func (ds *DCUDevices) Allocate(kubeClient kubernetes.Interface, pod *v1.Pod) error {
 	if HygonVDCUEnable {
+		updatedPod, err := kubeClient.CoreV1().Pods(pod.Namespace).Get(context.Background(), pod.Name, metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+		_, ok := updatedPod.Annotations[AssignedIDsAllocatedAnnotations]
+		if ok {
+			klog.V(4).Infof("Pod %s already allocated, skip", pod.Name)
+			return nil
+		}
 		klog.V(4).Infoln("hami-vdcu DeviceSharing:Into AllocateToPod", pod.Name)
-		fit, device, _, err := checkNodeDCUSharingPredicateAndScore(pod, ds, false, SchedulePolicyArgument)
+		fit, devices, score, err := checkNodeDCUSharingPredicateAndScore(pod, ds, false, SchedulePolicyArgument)
+		klog.V(5).Infof("schedulePolicy:%s , Allocate-ds: %+v , devices: %+v , score: %+v", SchedulePolicyArgument, ds, devices, score)
 		if err != nil || !fit {
 			klog.ErrorS(err, "Failed to allocate vdcu task", "pod", pod.Name)
 			return err
@@ -280,7 +293,7 @@ func (ds *DCUDevices) Allocate(kubeClient kubernetes.Interface, pod *v1.Pod) err
 		annotations := make(map[string]string)
 		annotations[AssignedNodeAnnotations] = ds.Name
 		annotations[AssignedTimeAnnotations] = strconv.FormatInt(time.Now().Unix(), 10)
-		podDevicesAnnotations := encodePodDevices(device)
+		podDevicesAnnotations := encodePodDevices(devices)
 		annotations[AssignedIDsToAllocateAnnotations] = podDevicesAnnotations
 		annotations[AssignedIDsAllocatedAnnotations] = podDevicesAnnotations
 
