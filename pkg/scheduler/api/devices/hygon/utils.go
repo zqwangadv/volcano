@@ -395,14 +395,18 @@ func checkNodeDCUSharingPredicateAndScore(pod *v1.Pod, dssnap *DCUDevices, repli
 			//free += node.Devices[i].Count - node.Devices[i].Used
 			if request.Nums > 0 {
 				request.Nums--
-				klog.V(3).Info("fitted uuid: ", uuid)
+				if !replicate {
+					klog.V(3).Info("fitted uuid: ", uuid)
+				}
 				devs = append(devs, ContainerDevice{
 					UUID:      uuid,
 					Type:      request.Type,
 					Usedmem:   memreqForCard,
 					Usedcores: uint(request.Coresreq),
 				})
-				score += DCUScore(schedulePolicy, ds.Device[i])
+				if replicate {
+					score = score + DCUScore(schedulePolicy, ds.Device[i])
+				}
 			}
 			if request.Nums == 0 {
 				break

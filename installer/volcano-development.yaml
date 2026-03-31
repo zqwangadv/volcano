@@ -155,7 +155,7 @@ spec:
             - -v=4
             - 2>&1
           image: docker.io/volcanosh/vc-webhook-manager:v1.14.1
-          imagePullPolicy: Always
+          imagePullPolicy: IfNotPresent
           name: admission
           volumeMounts:
             - mountPath: /admission.local.config/certificates
@@ -253,7 +253,7 @@ spec:
       containers:
         - name: main
           image: docker.io/volcanosh/vc-webhook-manager:v1.14.1
-          imagePullPolicy: Always
+          imagePullPolicy: IfNotPresent
           command: ["./gen-admission-secret.sh", "--service", "volcano-admission-service", "--namespace",
                     "volcano-system", "--secret", "volcano-admission-secret"]
           securityContext:
@@ -8886,6 +8886,7 @@ metadata:
   namespace: volcano-system
 data:
   volcano-controller.conf: |
+
 ---
 # Source: volcano/templates/controllers.yaml
 kind: ClusterRole
@@ -9046,9 +9047,9 @@ spec:
             - --worker-threads=3
             - --worker-threads-for-gc=5
             - --worker-threads-for-podgroup=5
-            - -v=4
+            - -v=5
             - 2>&1
-          imagePullPolicy: Always
+          imagePullPolicy: IfNotPresent
           securityContext:
               allowPrivilegeEscalation: false
               capabilities:
@@ -9094,6 +9095,16 @@ data:
       - name: proportion
       - name: nodeorder
       - name: binpack
+    - plugins:
+      - name: gang
+      - name: priority
+      - name: predicates
+      - name: deviceshare
+        arguments:
+          deviceshare.VDCUEnable: true
+          deviceshare.SchedulePolicy: binpack
+          deviceshare.NodeLockEnable: true
+          deviceshare.ScheduleWeight: 10
 ---
 # Source: volcano/templates/scheduler.yaml
 kind: ClusterRole
@@ -9252,7 +9263,7 @@ spec:
       priorityClassName: system-cluster-critical
       containers:
         - name: volcano-scheduler
-          image: docker.io/volcanosh/vc-scheduler:v1.14.1
+          image: harbor.sourcefind.cn:5443/dcu/admin/base/vc-scheduler:1.14
           args:
             - --logtostderr
             - --scheduler-conf=/volcano.scheduler/volcano-scheduler.conf
@@ -9268,7 +9279,7 @@ spec:
           env:
             - name: DEBUG_SOCKET_DIR
               value: /tmp/klog-socks
-          imagePullPolicy: Always
+          imagePullPolicy: IfNotPresent
           volumeMounts:
             - name: scheduler-config
               mountPath: /volcano.scheduler
