@@ -371,7 +371,7 @@ func TestJobInfoPartitionPolicy(t *testing.T) {
 						Template: v1.PodTemplateSpec{
 							Spec: v1.PodSpec{},
 						},
-						// Core configuration: Mode=hard, HighestTierName=kubernetes.io/hostname
+						// Cores configuration: Mode=hard, HighestTierName=kubernetes.io/hostname
 						PartitionPolicy: &batch.PartitionPolicySpec{
 							NetworkTopology: &batch.NetworkTopologySpec{
 								Mode:               "hard",                   // Set mode to hard constraint
