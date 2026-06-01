@@ -216,6 +216,27 @@ func (dp *deviceSharePlugin) OnSessionOpen(ssn *framework.Session) {
 	// initialize devices which needs ssn as input
 	initializeDevicesWithSession(ssn)
 
+	// The snapshot was taken before enablePredicate ran, so nodes may not have DCU devices
+	// in their Others map. Refresh them now that HygonVDCUEnable is set correctly.
+	if vdcu.HygonVDCUEnable {
+		for _, nodeInfo := range ssn.Nodes {
+			if nodeInfo.Node == nil {
+				continue
+			}
+			dcuDevices := vdcu.NewDCUDevices(nodeInfo.Name, nodeInfo.Node)
+			nodeInfo.Others[vdcu.DeviceName] = dcuDevices
+			if dcuDevices == nil {
+				continue
+			}
+			// Re-populate DCU usage from already-allocated pods so that binpack
+			// scoring can see the current utilization of each physical DCU.
+			for _, task := range nodeInfo.Tasks {
+				if _, ok := task.Pod.Annotations[vdcu.AssignedIDsAllocatedAnnotations]; ok {
+					dcuDevices.AddResource(task.Pod)
+				}
+			}
+		}
+	}
 	// Register event handlers to update task info in PodLister & nodeMap
 	ssn.AddPredicateFn(dp.Name(), func(task *api.TaskInfo, node *api.NodeInfo) error {
 		predicateStatus := make([]*api.Status, 0)
