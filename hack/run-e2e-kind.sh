@@ -24,6 +24,7 @@ export LOG_LEVEL=3
 export CLEANUP_CLUSTER=${CLEANUP_CLUSTER:-1}
 export E2E_TYPE=${E2E_TYPE:-"ALL"}
 export ARTIFACTS_PATH=${ARTIFACTS_PATH:-"${VK_ROOT}/volcano-e2e-logs"}
+DRA_GINKGO_FOCUS=${DRA_GINKGO_FOCUS:-"DRA (Quota )?E2E Test"}
 mkdir -p "$ARTIFACTS_PATH"
 
 NAMESPACE=${NAMESPACE:-volcano-system}
@@ -40,7 +41,7 @@ export KWOK_NODE_MEMORY=${KWOK_NODE_MEMORY:-8Gi}  # 8GB
 # create kwok node
 function create-kwok-node() {
   local node_index=$1
-  
+
   kubectl apply -f - <<EOF
 apiVersion: v1
 kind: Node
@@ -140,6 +141,7 @@ custom:
   default_ns:
     node-role.kubernetes.io/control-plane: ""
   scheduler_feature_gates: ${FEATURE_GATES}
+  admission_feature_gates: ${FEATURE_GATES}
   enabled_admissions: ""
   vap_enable: true
   map_enable: true
@@ -185,18 +187,153 @@ custom:
   default_ns:
     node-role.kubernetes.io/control-plane: ""
   scheduler_feature_gates: ${FEATURE_GATES}
+  admission_feature_gates: ${FEATURE_GATES}
   enabled_admissions: "/pods/mutate,/queues/mutate,/podgroups/mutate,/jobs/mutate,/jobs/validate,/jobflows/validate,/pods/validate,/queues/validate,/podgroups/validate,/hypernodes/validate,/cronjobs/validate"
   vap_enable: false
   map_enable: false
   ignored_provisioners: ${IGNORED_PROVISIONERS:-""}
 EOF
   ;;
+"AGENTSCHEDULER"|"AGENTSCHEDULER_NONE"|"AGENTSCHEDULER_SOFT"|"AGENTSCHEDULER_HARD")
+  agent_scheduler_sharding_mode="${E2E_TYPE#AGENTSCHEDULER_}"
+  if [[ "${agent_scheduler_sharding_mode}" == "AGENTSCHEDULER" ]]; then
+    agent_scheduler_sharding_mode="NONE"
+  fi
+  agent_scheduler_sharding_mode=$(echo "${agent_scheduler_sharding_mode}" | tr '[:upper:]' '[:lower:]')
+  echo "Install volcano chart with crd version $crd_version, sharding controller and agent scheduler ${agent_scheduler_sharding_mode} mode enabled"
+  helm-install-volcano "  controller_log_level: 5
+  controller_enabled_controllers: \"*\"
+  agent_scheduler_enable: true
+  agent_scheduler_sharding_mode: ${agent_scheduler_sharding_mode}
+  agent_scheduler_worker_count: 2
+  agent_scheduler_tolerations:
+    - key: "node-role.kubernetes.io/control-plane"
+      operator: "Exists"
+      effect: "NoSchedule"
+    - key: "node-role.kubernetes.io/master"
+      operator: "Exists"
+      effect: "NoSchedule"
+  sharding_configmap_data: |
+    schedulerConfigs:
+      - name: agent-scheduler
+        type: agent
+        policies:
+          - name: allocation-rate
+            weight: 1
+            arguments:
+              minCPUUtil: 0.0
+              maxCPUUtil: 0.6
+          - name: node-limit
+            arguments:
+              minNodes: 1
+              maxNodes: 1
+      - name: volcano
+        type: volcano
+        policies:
+          - name: node-limit
+            arguments:
+              minNodes: 1
+              maxNodes: 100
+    shardSyncPeriod: "30s"
+    enableNodeEventTrigger: true"
+  ;;
+"SHARDINGCONTROLLER")
+  echo "Install volcano chart with crd version $crd_version and sharding controller enabled"
+  helm-install-volcano '  controller_log_level: 5
+  controller_enabled_controllers: "*"
+  sharding_configmap_data: |
+    schedulerConfigs:
+      - name: volcano
+        type: volcano
+        policies:
+          - name: allocation-rate
+            weight: 1
+            arguments:
+              minCPUUtil: 0.0
+              maxCPUUtil: 0.6
+          - name: node-limit
+            arguments:
+              minNodes: 2
+              maxNodes: 100
+      - name: agent-scheduler
+        type: agent
+        policies:
+          - name: allocation-rate
+            weight: 1
+            arguments:
+              minCPUUtil: 0.7
+              maxCPUUtil: 1.0
+          - name: warmup
+            weight: 1
+          - name: node-limit
+            arguments:
+              minNodes: 2
+              maxNodes: 100
+    shardSyncPeriod: "60s"
+    enableNodeEventTrigger: true'
+  ;;
+"SCHEDULERSHARDING"|"SCHEDULERSHARDING_NONE"|"SCHEDULERSHARDING_SOFT"|"SCHEDULERSHARDING_HARD")
+  scheduler_sharding_mode="${E2E_TYPE#SCHEDULERSHARDING_}"
+  if [[ "${scheduler_sharding_mode}" == "SCHEDULERSHARDING" ]]; then
+    scheduler_sharding_mode="HARD"
+  fi
+  scheduler_sharding_mode=$(echo "${scheduler_sharding_mode}" | tr '[:upper:]' '[:lower:]')
+  echo "Install volcano chart with crd version $crd_version and scheduler sharding ${scheduler_sharding_mode} mode enabled"
+  helm-install-volcano "  controller_log_level: 5
+  controller_enabled_controllers: \"*\"
+  scheduler_sharding_mode: ${scheduler_sharding_mode}
+  sharding_configmap_data: |
+    schedulerConfigs:
+      - name: volcano
+        type: volcano
+        policies:
+          - name: allocation-rate
+            weight: 1
+            arguments:
+              minCPUUtil: 0.0
+              maxCPUUtil: 0.6
+          - name: node-limit
+            arguments:
+              minNodes: 1
+              maxNodes: 1
+      - name: agent-scheduler
+        type: agent
+        policies:
+          - name: node-limit
+            arguments:
+              minNodes: 1
+              maxNodes: 100
+    shardSyncPeriod: "30s"
+    enableNodeEventTrigger: true"
+  ;;
 *)
   echo "Install volcano chart with crd version $crd_version"
+  helm-install-volcano
+  ;;
+esac
+}
+
+# helm-install-volcano installs volcano with common helm values.
+# Pass case-specific custom values as a string argument (optional).
+# The extra values are written to a temporary file and merged via --values
+# so that YAML literal block scalars (|) are parsed correctly.
+function helm-install-volcano {
+  local extra_custom_values="${1:-}"
+  local extra_values_flag=""
+  if [[ -n "${extra_custom_values}" ]]; then
+    local tmpfile
+    tmpfile=$(mktemp /tmp/volcano-extra-values-XXXXXX.yaml)
+    cat > "${tmpfile}" <<EXTRA
+custom:
+${extra_custom_values}
+EXTRA
+    extra_values_flag="--values ${tmpfile}"
+  fi
   cat <<EOF | helm install ${CLUSTER_NAME} installer/helm/chart/volcano \
   --namespace ${NAMESPACE} \
   --kubeconfig ${KUBECONFIG} \
   --values - \
+  ${extra_values_flag} \
   --wait
 basic:
   image_pull_policy: IfNotPresent
@@ -230,11 +367,13 @@ custom:
   default_ns:
     node-role.kubernetes.io/control-plane: ""
   scheduler_feature_gates: ${FEATURE_GATES}
+  admission_feature_gates: ${FEATURE_GATES}
   enabled_admissions: "/pods/mutate,/queues/mutate,/podgroups/mutate,/jobs/mutate,/jobs/validate,/jobflows/validate,/pods/validate,/queues/validate,/podgroups/validate,/hypernodes/validate,/cronjobs/validate"
   ignored_provisioners: ${IGNORED_PROVISIONERS:-""}
 EOF
-  ;;
-esac
+  local helm_status=${PIPESTATUS[1]}
+  [[ -n "${extra_values_flag}" ]] && rm -f "${tmpfile}"
+  return "${helm_status}"
 }
 
 function uninstall-volcano {
@@ -267,25 +406,33 @@ Customize kind options other than --name:
 Disable displaying volcano component logs:
 
     export SHOW_VOLCANO_LOGS=0
+
+Skip cluster creation and Volcano installation (use existing cluster):
+
+    export SKIP_CLUSTER_SETUP=1
 "
   exit 0
 fi
 
-if [[ $CLEANUP_CLUSTER -eq 1 ]]; then
-    trap cleanup EXIT
-fi
-
 source "${VK_ROOT}/hack/lib/install.sh"
-
-check-prerequisites
-kind-up-cluster
-install-kwok-with-helm
 
 if [[ -z ${KUBECONFIG+x} ]]; then
     export KUBECONFIG="${HOME}/.kube/config"
 fi
 
-install-volcano
+if [[ "${SKIP_CLUSTER_SETUP:-0}" -eq 1 ]]; then
+    echo "Skipping cluster setup (SKIP_CLUSTER_SETUP=1), using existing cluster"
+    check-prerequisites
+else
+    if [[ $CLEANUP_CLUSTER -eq 1 ]]; then
+        trap cleanup EXIT
+    fi
+
+    check-prerequisites
+    kind-up-cluster
+    install-kwok-with-helm
+    install-volcano
+fi
 
 # Run e2e test
 cd ${VK_ROOT}
@@ -298,10 +445,11 @@ case ${E2E_TYPE} in
     KUBECONFIG=${KUBECONFIG} GOOS=${OS} ginkgo -r --nodes=4 --compilers=4 --randomize-all --randomize-suites --fail-on-pending --cover --trace --race --slow-spec-threshold='30s' --progress ./test/e2e/jobp/
     KUBECONFIG=${KUBECONFIG} GOOS=${OS} ginkgo -r --slow-spec-threshold='30s' --progress ./test/e2e/jobseq/
     KUBECONFIG=${KUBECONFIG} GOOS=${OS} ginkgo -r --slow-spec-threshold='30s' --progress ./test/e2e/schedulingbase/
-    KUBECONFIG=${KUBECONFIG} GOOS=${OS} ginkgo -r --slow-spec-threshold='30s' --progress ./test/e2e/schedulingaction/
+    # k8s 1.35 init will import its e2e suite, these k8s's suites need to skip
+    KUBECONFIG=${KUBECONFIG} GOOS=${OS} ginkgo -r --skip="\[sig-.*\]" --slow-spec-threshold='30s' --progress ./test/e2e/schedulingaction/
     KUBECONFIG=${KUBECONFIG} GOOS=${OS} ginkgo -r --slow-spec-threshold='30s' --progress ./test/e2e/vcctl/
     KUBECONFIG=${KUBECONFIG} GOOS=${OS} ginkgo -r --slow-spec-threshold='30s' --progress ./test/e2e/cronjob/
-    KUBECONFIG=${KUBECONFIG} GOOS=${OS} ginkgo -r --slow-spec-threshold='30s' --progress --focus="DRA E2E Test" ./test/e2e/dra/
+    KUBECONFIG=${KUBECONFIG} GOOS=${OS} ginkgo -r --slow-spec-threshold='30s' --progress --focus="${DRA_GINKGO_FOCUS}" ./test/e2e/dra/
     KUBECONFIG=${KUBECONFIG} GOOS=${OS} ginkgo -r --slow-spec-threshold='30s' --progress ./test/e2e/admission/
     KUBECONFIG=${KUBECONFIG} GOOS=${OS} ginkgo -r --slow-spec-threshold='30s' --progress ./test/e2e/hypernode/
     ;;
@@ -314,12 +462,17 @@ case ${E2E_TYPE} in
     KUBECONFIG=${KUBECONFIG} GOOS=${OS} ginkgo -v -r --slow-spec-threshold='30s' --progress ./test/e2e/jobseq/
     ;;
 "SCHEDULINGBASE")
-    echo "Running scheduling base e2e suite..."
-    KUBECONFIG=${KUBECONFIG} GOOS=${OS} ginkgo -v -r --slow-spec-threshold='30s' --progress ./test/e2e/schedulingbase/
+    echo "Running scheduling base e2e suite...(need skip k8s framework's suites)"
+    # k8s 1.35 init will import its e2e suite, these k8s's suites need to skip
+    KUBECONFIG=${KUBECONFIG} GOOS=${OS} ginkgo -v -r --skip="\[sig-.*\]" --slow-spec-threshold='30s' --progress ./test/e2e/schedulingbase/
     ;;
 "SCHEDULINGACTION")
     echo "Running scheduling action e2e suite..."
     KUBECONFIG=${KUBECONFIG} GOOS=${OS} ginkgo -v -r --slow-spec-threshold='30s' --progress ./test/e2e/schedulingaction/
+    ;;
+"SCHEDULINGGATES")
+    echo "Running scheduling gates e2e suite..."
+    KUBECONFIG=${KUBECONFIG} GOOS=${OS} ginkgo -v -r --slow-spec-threshold='30s' --progress ./test/e2e/schedulinggates/
     ;;
 "VCCTL")
     echo "Running vcctl e2e suite..."
@@ -331,7 +484,7 @@ case ${E2E_TYPE} in
     ;;
 "DRA")
     echo "Running dra e2e suite..."
-    KUBECONFIG=${KUBECONFIG} GOOS=${OS} ginkgo -v -r --slow-spec-threshold='30s' --progress --focus="DRA E2E Test" ./test/e2e/dra/
+    KUBECONFIG=${KUBECONFIG} GOOS=${OS} ginkgo -v -r --slow-spec-threshold='30s' --progress --focus="${DRA_GINKGO_FOCUS}" ./test/e2e/dra/
     ;;
 "ADMISSION_POLICY")
     echo "Running admission policy e2e suite..."
@@ -347,9 +500,37 @@ case ${E2E_TYPE} in
     echo "Running hypernode e2e suite..."
     KUBECONFIG=${KUBECONFIG} GOOS=${OS} ginkgo -r --slow-spec-threshold='30s' --progress ./test/e2e/hypernode/
     ;;
-"CRONJOB")  
-    echo "Running cronjob e2e suite..."  
-    KUBECONFIG=${KUBECONFIG} GOOS=${OS} ginkgo -v -r --slow-spec-threshold='30s' --progress ./test/e2e/cronjob/  
+"CRONJOB")
+    echo "Running cronjob e2e suite..."
+    KUBECONFIG=${KUBECONFIG} GOOS=${OS} ginkgo -v -r --slow-spec-threshold='30s' --progress ./test/e2e/cronjob/
+    ;;
+"AGENTSCHEDULER"|"AGENTSCHEDULER_NONE"|"AGENTSCHEDULER_SOFT"|"AGENTSCHEDULER_HARD")
+    agent_scheduler_sharding_mode="${E2E_TYPE#AGENTSCHEDULER_}"
+    if [[ "${agent_scheduler_sharding_mode}" == "AGENTSCHEDULER" ]]; then
+      agent_scheduler_sharding_mode="NONE"
+    fi
+    agent_scheduler_sharding_mode=$(echo "${agent_scheduler_sharding_mode}" | tr '[:upper:]' '[:lower:]')
+    echo "Running agent scheduler ${agent_scheduler_sharding_mode} e2e suite..."
+    KUBECONFIG=${KUBECONFIG} GOOS=${OS} ginkgo --label-filter="${agent_scheduler_sharding_mode}" -v -r --slow-spec-threshold='30s' --progress ./test/e2e/agentscheduler/
+    ;;
+"SHARDINGCONTROLLER")
+    echo "Running sharding controller e2e suite..."
+    KUBECONFIG=${KUBECONFIG} GOOS=${OS} ginkgo -v -r --slow-spec-threshold='30s' --progress ./test/e2e/shardingcontroller/
+    ;;
+"GANGEVICT")
+    echo "Creating 4 kwok nodes for gang eviction topology tests"
+    install-kwok-nodes 4
+    echo "Running gang eviction e2e suite..."
+    KUBECONFIG=${KUBECONFIG} GOOS=${OS} ginkgo -v -r --slow-spec-threshold='30s' --progress ./test/e2e/gangevict/
+    ;;
+"SCHEDULERSHARDING"|"SCHEDULERSHARDING_NONE"|"SCHEDULERSHARDING_SOFT"|"SCHEDULERSHARDING_HARD")
+    scheduler_sharding_mode="${E2E_TYPE#SCHEDULERSHARDING_}"
+    if [[ "${scheduler_sharding_mode}" == "SCHEDULERSHARDING" ]]; then
+      scheduler_sharding_mode="HARD"
+    fi
+    scheduler_sharding_mode=$(echo "${scheduler_sharding_mode}" | tr '[:upper:]' '[:lower:]')
+    echo "Running scheduler sharding ${scheduler_sharding_mode} e2e suite..."
+    KUBECONFIG=${KUBECONFIG} GOOS=${OS} ginkgo --label-filter="${scheduler_sharding_mode}" -v -r --slow-spec-threshold='30s' --progress ./test/e2e/schedulersharding/
     ;;
 esac
 

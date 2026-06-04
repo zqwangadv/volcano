@@ -23,7 +23,6 @@ limitations under the License.
 package framework
 
 import (
-	"context"
 	"fmt"
 	"maps"
 	"sort"
@@ -31,7 +30,6 @@ import (
 
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/uuid"
@@ -51,7 +49,7 @@ import (
 	"volcano.sh/volcano/pkg/scheduler/api"
 	"volcano.sh/volcano/pkg/scheduler/cache"
 	"volcano.sh/volcano/pkg/scheduler/conf"
-	"volcano.sh/volcano/pkg/scheduler/metrics"
+	"volcano.sh/volcano/pkg/scheduler/gate"
 	"volcano.sh/volcano/pkg/scheduler/util"
 )
 
@@ -74,14 +72,16 @@ type Session struct {
 	restConfig      *rest.Config
 	informerFactory informers.SharedInformerFactory
 
-	TotalResource  *api.Resource
-	TotalGuarantee *api.Resource
-	TotalDeserved  *api.Resource
+	TotalResource *api.Resource
 	// PodGroupOldState contains podgroup status and annotations during schedule
 	// This should not be mutated after initiated
 	PodGroupOldState *api.PodGroupOldState
 	// DirtyJobs include the jobs that need to flush to SchedulerCache on session close
 	DirtyJobs sets.Set[api.JobID]
+
+	// schGateManager is the scheduler gate manager, passed in from the Scheduler.
+	// Nil when SchedulingGatesQueueAdmission feature gate is disabled.
+	schGateManager *gate.SchGateManager
 
 	Jobs           map[api.JobID]*api.JobInfo
 	Nodes          map[string]*api.NodeInfo
@@ -128,6 +128,7 @@ type Session struct {
 	hyperNodeOrderFns   map[string]api.HyperNodeOrderFn
 	preemptableFns      map[string]api.EvictableFn
 	reclaimableFns      map[string]api.EvictableFn
+	unifiedEvictableFns map[string]api.UnifiedEvictableFn
 	overusedFns         map[string]api.ValidateFn
 	// preemptiveFns means whether current queue can reclaim from other queue,
 	// while reclaimableFns means whether current queue's resources can be reclaimed.
@@ -173,9 +174,7 @@ func openSession(cache cache.Cache) *Session {
 		cache:           cache,
 		informerFactory: cache.SharedInformerFactory(),
 
-		TotalResource:  api.EmptyResource(),
-		TotalGuarantee: api.EmptyResource(),
-		TotalDeserved:  api.EmptyResource(),
+		TotalResource: api.EmptyResource(),
 		PodGroupOldState: &api.PodGroupOldState{
 			Status:      map[api.JobID]scheduling.PodGroupStatus{},
 			Annotations: map[api.JobID]map[string]string{},
@@ -203,6 +202,7 @@ func openSession(cache cache.Cache) *Session {
 		hyperNodeOrderFns:             map[string]api.HyperNodeOrderFn{},
 		preemptableFns:                map[string]api.EvictableFn{},
 		reclaimableFns:                map[string]api.EvictableFn{},
+		unifiedEvictableFns:           map[string]api.UnifiedEvictableFn{},
 		overusedFns:                   map[string]api.ValidateFn{},
 		preemptiveFns:                 map[string]api.ValidateWithCandidateFn{},
 		allocatableFns:                map[string]api.AllocatableFn{},
@@ -244,6 +244,7 @@ func openSession(cache cache.Cache) *Session {
 	ssn.HyperNodesReadyToSchedule = snapshot.HyperNodesReadyToSchedule
 	ssn.addClusterTopHyperNode(ssn.NodeList)
 	ssn.parseHyperNodesTiers()
+	ssn.adjustNetworkTopologySpec()
 
 	if ssn.HyperNodesReadyToSchedule {
 		// hyperNodes in ssn has ClusterTopHyperNode
@@ -501,6 +502,8 @@ func updateQueueStatus(ssn *Session) {
 	rootQueue := api.QueueID("root")
 	// calculate allocated resources on each queue
 	var allocatedResources = make(map[api.QueueID]*api.Resource, len(ssn.Queues))
+	var allocatedDRAResources = make(map[api.QueueID]map[string]*api.DRAResource, len(ssn.Queues))
+	var allocatedDRAClaimRefs = make(map[api.QueueID]map[string]int, len(ssn.Queues))
 	for queueID := range ssn.Queues {
 		allocatedResources[queueID] = &api.Resource{}
 	}
@@ -510,6 +513,7 @@ func updateQueueStatus(ssn *Session) {
 				for _, task := range tasks {
 					addNodeSharableDeviceUsage(ssn, task)
 					allocatedResources[job.Queue].Add(task.Resreq)
+					addTaskDRAAllocatedByQueue(allocatedDRAResources, allocatedDRAClaimRefs, job.Queue, task)
 					// recursively updates the allocated resources of parent queues
 					queue := ssn.Queues[job.Queue].Queue
 					// compatibility unit testing
@@ -519,6 +523,7 @@ func updateQueueStatus(ssn *Session) {
 							parent = queue.Spec.Parent
 						}
 						allocatedResources[api.QueueID(parent)].Add(task.Resreq)
+						addTaskDRAAllocatedByQueue(allocatedDRAResources, allocatedDRAClaimRefs, api.QueueID(parent), task)
 
 						if parent == string(rootQueue) {
 							break
@@ -534,10 +539,7 @@ func updateQueueStatus(ssn *Session) {
 	for queueID := range ssn.Queues {
 		// convert api.Resource to v1.ResourceList
 		var queueStatus = util.ConvertRes2ResList(allocatedResources[queueID]).DeepCopy()
-		if queueID == rootQueue {
-			updateRootQueueResources(ssn, queueStatus)
-			continue
-		}
+		queueStatus = mergeDRAAllocatedIntoResourceList(queueStatus, allocatedDRAResources[queueID])
 
 		if equality.Semantic.DeepEqual(ssn.Queues[queueID].Queue.Status.Allocated, queueStatus) {
 			klog.V(5).Infof("Queue <%s> allocated resource keeps equal, no need to update queue status <%v>.",
@@ -549,47 +551,6 @@ func updateQueueStatus(ssn *Session) {
 
 		if err := ssn.cache.UpdateQueueStatus(ssn.Queues[queueID]); err != nil {
 			klog.Errorf("failed to update queue <%s> status: %s", ssn.Queues[queueID].Name, err.Error())
-		}
-	}
-}
-
-// updateRootQueueResources updates the deserved/guaranteed resource and allocated resource of the root queue
-func updateRootQueueResources(ssn *Session, allocated v1.ResourceList) {
-	rootQueue := api.QueueID("root")
-	totalDeserved := util.ConvertRes2ResList(ssn.TotalDeserved).DeepCopy()
-	totalGuarantee := util.ConvertRes2ResList(ssn.TotalGuarantee).DeepCopy()
-
-	if equality.Semantic.DeepEqual(ssn.Queues[rootQueue].Queue.Spec.Deserved, totalDeserved) &&
-		equality.Semantic.DeepEqual(ssn.Queues[rootQueue].Queue.Spec.Guarantee.Resource, totalGuarantee) &&
-		equality.Semantic.DeepEqual(ssn.Queues[rootQueue].Queue.Status.Allocated, allocated) {
-		klog.V(5).Infof("Root queue deserved/guaranteed resource and allocated resource remains the same, no need to update the queue.")
-		return
-	}
-
-	queue := &vcv1beta1.Queue{}
-	err := schedulingscheme.Scheme.Convert(ssn.Queues[rootQueue].Queue, queue, nil)
-	if err != nil {
-		klog.Errorf("failed to convert scheduling.Queue to v1beta1.Queue: %s", err.Error())
-		return
-	}
-
-	if !equality.Semantic.DeepEqual(queue.Spec.Deserved, totalDeserved) ||
-		!equality.Semantic.DeepEqual(queue.Spec.Guarantee.Resource, totalGuarantee) {
-		queue.Spec.Deserved = totalDeserved
-		queue.Spec.Guarantee.Resource = totalGuarantee
-		queue, err = ssn.VCClient().SchedulingV1beta1().Queues().Update(context.TODO(), queue, metav1.UpdateOptions{})
-		if err != nil {
-			klog.Errorf("failed to update root queue: %s", err.Error())
-			return
-		}
-	}
-
-	if !equality.Semantic.DeepEqual(queue.Status.Allocated, allocated) {
-		queue.Status.Allocated = allocated
-		_, err = ssn.VCClient().SchedulingV1beta1().Queues().UpdateStatus(context.TODO(), queue, metav1.UpdateOptions{})
-		if err != nil {
-			klog.Errorf("failed to update root queue status: %s", err.Error())
-			return
 		}
 	}
 }
@@ -753,11 +714,7 @@ func (ssn *Session) Pipeline(task *api.TaskInfo, hostname string) error {
 	// Only update status in session
 	job, found := ssn.Jobs[task.Job]
 	if found {
-		if err := job.UpdateTaskStatus(task, api.Pipelined); err != nil {
-			klog.Errorf("Failed to update task <%v/%v> status to %v when pipeline in Session <%v>: %v",
-				task.Namespace, task.Name, api.Pipelined, ssn.UID, err)
-			return err
-		}
+		job.UpdateTaskStatus(task, api.Pipelined)
 	} else {
 		klog.Errorf("Failed to find Job <%s> in Session <%s> index when pipeline.",
 			task.Job, ssn.UID)
@@ -799,11 +756,7 @@ func (ssn *Session) Allocate(task *api.TaskInfo, nodeInfo *api.NodeInfo) (err er
 	// Only update status in session
 	job, found := ssn.Jobs[task.Job]
 	if found {
-		if err := job.UpdateTaskStatus(task, api.Allocated); err != nil {
-			klog.Errorf("Failed to update task <%v/%v> status to %v when binding in Session <%v>: %v",
-				task.Namespace, task.Name, api.Allocated, ssn.UID, err)
-			return err
-		}
+		job.UpdateTaskStatus(task, api.Allocated)
 	} else {
 		klog.Errorf("Failed to find Job <%s> in Session <%s> index when binding.",
 			task.Job, ssn.UID)
@@ -856,18 +809,13 @@ func (ssn *Session) dispatch(task *api.TaskInfo) error {
 
 	// Update status in session
 	if job, found := ssn.Jobs[task.Job]; found {
-		if err := job.UpdateTaskStatus(task, api.Binding); err != nil {
-			klog.Errorf("Failed to update task <%v/%v> status to %v when binding in Session <%v>: %v",
-				task.Namespace, task.Name, api.Binding, ssn.UID, err)
-			return err
-		}
+		job.UpdateTaskStatus(task, api.Binding)
 	} else {
 		klog.Errorf("Failed to find Job <%s> in Session <%s> index when binding.",
 			task.Job, ssn.UID)
 		return fmt.Errorf("failed to find job %s", task.Job)
 	}
 
-	metrics.UpdateTaskScheduleDuration(metrics.Duration(task.Pod.CreationTimestamp.Time))
 	return nil
 }
 
@@ -932,11 +880,7 @@ func (ssn *Session) Evict(reclaimee *api.TaskInfo, reason string) error {
 	// Update status in session
 	job, found := ssn.Jobs[reclaimee.Job]
 	if found {
-		if err := job.UpdateTaskStatus(reclaimee, api.Releasing); err != nil {
-			klog.Errorf("Failed to update task <%v/%v> status to %v when evicting in Session <%v>: %v",
-				reclaimee.Namespace, reclaimee.Name, api.Releasing, ssn.UID, err)
-			return err
-		}
+		job.UpdateTaskStatus(reclaimee, api.Releasing)
 	} else {
 		klog.Errorf("Failed to find Job <%s> in Session <%s> index when evicting.",
 			reclaimee.Job, ssn.UID)
@@ -945,11 +889,7 @@ func (ssn *Session) Evict(reclaimee *api.TaskInfo, reason string) error {
 
 	// Update task in node.
 	if node, found := ssn.Nodes[reclaimee.NodeName]; found {
-		if err := node.UpdateTask(reclaimee); err != nil {
-			klog.Errorf("Failed to update task <%v/%v> in Session <%v>: %v",
-				reclaimee.Namespace, reclaimee.Name, ssn.UID, err)
-			return err
-		}
+		node.UpdateTask(reclaimee)
 	}
 
 	for _, eh := range ssn.eventHandlers {
@@ -1008,6 +948,17 @@ func (ssn *Session) KubeClient() kubernetes.Interface {
 	return ssn.kubeClient
 }
 
+// SchGateManager returns the scheduler gate manager.
+// Returns nil when SchedulingGatesQueueAdmission feature gate is disabled.
+func (ssn *Session) SchGateManager() *gate.SchGateManager {
+	return ssn.schGateManager
+}
+
+// SetSchGateManager sets the gate manager on the session.
+func (ssn *Session) SetSchGateManager(m *gate.SchGateManager) {
+	ssn.schGateManager = m
+}
+
 // VCClient returns the volcano client
 func (ssn *Session) VCClient() vcclient.Interface {
 	return ssn.vcClient
@@ -1038,7 +989,7 @@ func (ssn *Session) RecordPodGroupEvent(podGroup *api.PodGroup, eventType, reaso
 }
 
 // SharedDRAManager returns the shared DRAManager from cache
-func (ssn *Session) SharedDRAManager() k8sframework.SharedDRAManager {
+func (ssn *Session) SharedDRAManager() fwk.SharedDRAManager {
 	return ssn.cache.SharedDRAManager()
 }
 
@@ -1076,4 +1027,105 @@ func (ssn *Session) String() string {
 
 func (ssn *Session) IsJobTerminated(jobId api.JobID) bool {
 	return ssn.cache.IsJobTerminated(jobId)
+}
+
+// adjustNetworkTopologySpec translates highestTierName in scheduler-internal network topology copies into highestTierAllowed,
+// and converts soft topology mode to hard mode with ClusterTopHyperNode tier as maxTier.
+// As a result, once adjustNetworkTopologySpec is invoked, it is no need to consider highestTierName or soft mode anymore.
+func (ssn *Session) adjustNetworkTopologySpec() {
+	klog.V(3).Infof("Start adjusting jobs' network topology spec according to hyperNodeTierNameMap %v", ssn.HyperNodeTierNameMap)
+	defer klog.V(3).Infof("Finish adjusting jobs' network topology spec according to hyperNodeTierNameMap %v", ssn.HyperNodeTierNameMap)
+
+	for _, job := range ssn.Jobs {
+		if !job.ContainsNetworkTopology() {
+			continue
+		}
+
+		translated, err := translateHighestTierNameToAllowed(job.NetworkTopology, ssn.HyperNodeTierNameMap)
+		if err != nil {
+			klog.Warningf("Failed to translate highestTierName for job %s/%s: %v, skip translation", job.Namespace, job.Name, err)
+		} else if translated {
+			klog.V(4).Infof("Translated highestTierName for job %s/%s, new highestTierAllowed is %d",
+				job.Namespace, job.Name, *job.NetworkTopology.HighestTierAllowed)
+		}
+
+		// NetworkTopology of SubJob is derived from the original job or SubGroupPolicy NetworkTopology,
+		// and will be used by plugins like network-topology-aware.
+		for _, subJob := range job.SubJobs {
+			translated, err = translateHighestTierNameToAllowed(subJob.NetworkTopology, ssn.HyperNodeTierNameMap)
+			if err != nil {
+				klog.Warningf("Failed to translate highestTierName for subJob %s of job %s/%s: %v, skip translation",
+					subJob.UID, job.Namespace, job.Name, err)
+			} else if translated {
+				klog.V(4).Infof("Translated highestTierName for subJob %s of job %s/%s, new highestTierAllowed is %d",
+					subJob.UID, job.Namespace, job.Name, *subJob.NetworkTopology.HighestTierAllowed)
+			}
+		}
+	}
+
+	// Convert soft topology to hard topology with ClusterTopHyperNode tier as maxTier,
+	// so that soft-mode jobs reuse the hard-mode scheduling path without any HyperNode filtering.
+	clusterTopHyperNode, exists := ssn.HyperNodes[ClusterTopHyperNode]
+	if !exists {
+		return
+	}
+	maxTier := clusterTopHyperNode.Tier()
+	for _, job := range ssn.Jobs {
+		if !job.ContainsNetworkTopology() {
+			continue
+		}
+		convertSoftToHardTopology(job, maxTier)
+	}
+}
+
+// convertSoftToHardTopology converts all soft network topology constraints in the job to hard mode.
+// Conversion strategy:
+//   - Job-level soft: converted with maxTier (ClusterTopHyperNode tier), achieving no HyperNode
+//     filtering (full soft affinity across the cluster).
+//   - SubJob-level soft: converted with the effective job-level tier (subJobMaxTier).
+//     If the job has a hard tier limit (either user-specified or from the job-level conversion above),
+//     subgroup soft affinity is bounded by that limit. This properly handles the mixed-mode scenario
+//     where job is hard but subgroup is soft: the subgroup prefers lower tiers but never exceeds
+//     the job's hard tier constraint.
+func convertSoftToHardTopology(job *api.JobInfo, maxTier int) {
+	if job.PodGroup == nil {
+		return
+	}
+
+	// Convert job-level soft topology to hard mode with maxTier.
+	if job.NetworkTopology != nil &&
+		job.NetworkTopology.Mode == scheduling.SoftNetworkTopologyMode {
+		klog.V(3).InfoS("Converting job-level soft topology to hard mode",
+			"job", job.UID, "maxTier", maxTier)
+		job.NetworkTopology.Mode = scheduling.HardNetworkTopologyMode
+		job.NetworkTopology.HighestTierAllowed = &maxTier
+		job.NetworkTopology.HighestTierName = ""
+	}
+
+	// Determine the effective maxTier for SubJob conversion.
+	// If the job has an effective tier limit (from hard mode or job-level soft→hard conversion above),
+	// subgroup soft affinity must be bounded by it. Otherwise, fall back to the cluster-wide maxTier.
+	subJobMaxTier := maxTier
+	if job.NetworkTopology != nil &&
+		job.NetworkTopology.HighestTierAllowed != nil {
+		subJobMaxTier = *job.NetworkTopology.HighestTierAllowed
+	}
+
+	// Convert SubJob-level topology (SubJobInfo has its own deep-copied networkTopology).
+	for _, subJob := range job.SubJobs {
+		subJob.ConvertToHardTopology(subJobMaxTier)
+	}
+}
+
+func translateHighestTierNameToAllowed(spec *scheduling.NetworkTopologySpec, nameMap api.HyperNodeTierNameMap) (bool, error) {
+	if spec != nil && spec.HighestTierAllowed == nil && spec.HighestTierName != "" {
+		if tier, ok := nameMap[spec.HighestTierName]; ok {
+			spec.HighestTierAllowed = &tier
+			spec.HighestTierName = ""
+			return true, nil
+		} else {
+			return false, fmt.Errorf("failed to find hypernode tier name %s", spec.HighestTierName)
+		}
+	}
+	return false, nil
 }

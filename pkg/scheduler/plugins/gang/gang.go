@@ -100,6 +100,12 @@ func (gp *gangPlugin) OnSessionOpen(ssn *framework.Session) {
 
 		for _, preemptee := range preemptees {
 			job := ssn.Jobs[preemptee.Job]
+			if job == nil {
+				klog.Warningf("[gang] Skip preemptee <%s/%s>: job <%s> not found in session (orphaned task from deleted PodGroup)",
+					preemptee.Namespace, preemptee.Name, preemptee.Job)
+				continue
+			}
+
 			if _, found := jobOccupiedMap[job.UID]; !found {
 				jobOccupiedMap[job.UID] = job.ReadyTaskNum()
 			}
@@ -121,6 +127,14 @@ func (gp *gangPlugin) OnSessionOpen(ssn *framework.Session) {
 	// TODO(k82cn): Support preempt/reclaim batch job.
 	ssn.AddReclaimableFn(gp.Name(), preemptableFn)
 	ssn.AddPreemptableFn(gp.Name(), preemptableFn)
+
+	// Currently handles GangReclaim and GangPreempt only.
+	// Support for legacy task-level preempt/reclaim will be added in the future.
+	ssn.AddUnifiedEvictableFn(gp.Name(), func(_ *api.EvictionContext, candidates []*api.TaskInfo) ([]*api.TaskInfo, int) {
+		// Gang-aware eviction uses the bundle model (safe/whole split) to manage
+		// MinAvailable constraints, so the plugin permits all candidates here.
+		return candidates, util.Permit
+	})
 
 	jobOrderFn := func(l, r interface{}) int {
 		lv := l.(*api.JobInfo)

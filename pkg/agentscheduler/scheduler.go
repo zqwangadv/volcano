@@ -40,7 +40,9 @@ import (
 	"volcano.sh/volcano/pkg/filewatcher"
 	schedulingapi "volcano.sh/volcano/pkg/scheduler/api"
 	"volcano.sh/volcano/pkg/scheduler/conf"
-	"volcano.sh/volcano/pkg/scheduler/metrics"
+	schedulermetrics "volcano.sh/volcano/pkg/scheduler/metrics"
+
+	agentmetrics "volcano.sh/volcano/pkg/agentscheduler/metrics"
 )
 
 // Scheduler represents a "Volcano Agent Scheduler".
@@ -132,13 +134,7 @@ func (sched *Scheduler) Run(stopCh <-chan struct{}) {
 // as defined by the Scheduler's schedule period.
 func (worker *Worker) runOnce() {
 	klog.V(4).Infof("Start scheduling in worker %d ...", worker.index)
-	scheduleStartTime := time.Now()
 	defer klog.V(4).Infof("End scheduling in worker %d ...", worker.index)
-	// Load ConfigMap to check which action is enabled.
-	conf.EnabledActionMap = make(map[string]bool)
-	for _, action := range worker.framework.Actions {
-		conf.EnabledActionMap[action.Name()] = true
-	}
 
 	schedCtx, err := worker.generateNextSchedulingContext()
 	if err != nil {
@@ -150,12 +146,16 @@ func (worker *Worker) runOnce() {
 		return
 	}
 
+	scheduleStartTime := time.Now()
+
 	// Update snapshot from cache before scheduling
 	snapshot := worker.framework.GetSnapshot()
+	snapshotStart := time.Now()
 	if err := worker.framework.Cache.UpdateSnapshot(snapshot); err != nil {
 		klog.Errorf("Failed to update snapshot in worker %d: %v, skip this scheduling cycle", worker.index, err)
 		return
 	}
+	agentmetrics.UpdateUpdateSnapshotDuration(time.Since(snapshotStart))
 
 	worker.framework.Cache.OnWorkerStartSchedulingCycle(worker.index, schedCtx)
 
@@ -163,7 +163,7 @@ func (worker *Worker) runOnce() {
 	// worker.framework.OnCycleStart()
 
 	defer func() {
-		metrics.UpdateE2eDuration(metrics.Duration(scheduleStartTime))
+		agentmetrics.UpdateWorkerSchedulingCycleDuration(schedulermetrics.Duration(scheduleStartTime))
 		// TODO: Call OnCycleEnd for all plugins
 		// worker.framework.OnCycleEnd()
 		worker.framework.Cache.OnWorkerEndSchedulingCycle(worker.index)
@@ -173,7 +173,7 @@ func (worker *Worker) runOnce() {
 	for _, action := range worker.framework.Actions {
 		actionStartTime := time.Now()
 		action.Execute(worker.framework, schedCtx)
-		metrics.UpdateActionDuration(action.Name(), metrics.Duration(actionStartTime))
+		schedulermetrics.UpdateActionDuration(action.Name(), schedulermetrics.Duration(actionStartTime))
 	}
 }
 

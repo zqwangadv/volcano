@@ -57,6 +57,12 @@ func Run(config *options.Config) error {
 		return fmt.Errorf("unable to build k8s config: %v", err)
 	}
 
+	// Align default feature-gates with the connected cluster's version.
+	if err := commonutil.SetupComponentGlobals(restConfig); err != nil {
+		klog.Errorf("failed to set component globals: %v", err)
+		return err
+	}
+
 	admissionConf := wkconfig.LoadAdmissionConf(config.ConfigPath)
 	if admissionConf == nil {
 		klog.Errorf("loadAdmissionConf failed.")
@@ -91,6 +97,9 @@ func Run(config *options.Config) error {
 			service.Config.SchedulerNames = config.SchedulerNames
 			service.Config.Recorder = recorder
 			service.Config.ConfigData = admissionConf
+			service.Config.EnableQueueAllocatedPodsCheck = config.EnableQueueAllocatedPodsCheck
+			service.Config.MaxQueueDepth = config.MaxQueueDepth
+			service.Config.EnableRootQueueProtection = config.EnableRootQueueProtection
 		}
 
 		klog.V(3).Infof("Registered '%s' as webhook.", service.Path)

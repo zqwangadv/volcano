@@ -414,7 +414,6 @@ func (ni *NodeInfo) setNode(node *v1.Node) {
 			ni.allocateIdleResource(ti)
 			ni.Releasing.Add(ti.Resreq)
 			ni.Used.Add(ti.Resreq)
-			ni.addResource(ti.Pod)
 		case Pipelined:
 			ni.Pipelined.Add(ti.Resreq)
 		default:
@@ -462,7 +461,6 @@ func (ni *NodeInfo) AddTask(task *TaskInfo) error {
 			ni.allocateIdleResource(ti)
 			ni.Releasing.Add(ti.Resreq)
 			ni.Used.Add(ti.Resreq)
-			ni.addResource(ti.Pod)
 		case Pipelined:
 			ni.Pipelined.Add(ti.Resreq)
 		case Binding:
@@ -493,16 +491,14 @@ func (ni *NodeInfo) AddTask(task *TaskInfo) error {
 }
 
 // RemoveTask used to remove a task from nodeInfo object.
-//
-// If error occurs both task and node are guaranteed to be in the original state.
-func (ni *NodeInfo) RemoveTask(ti *TaskInfo) error {
+func (ni *NodeInfo) RemoveTask(ti *TaskInfo) {
 	key := PodKey(ti.Pod)
 
 	task, found := ni.Tasks[key]
 	if !found {
 		klog.Warningf("failed to find task <%v/%v> on host <%v>",
 			ti.Namespace, ti.Name, ni.Name)
-		return nil
+		return
 	}
 
 	if ni.Node != nil {
@@ -511,7 +507,6 @@ func (ni *NodeInfo) RemoveTask(ti *TaskInfo) error {
 			ni.Releasing.Sub(task.Resreq)
 			ni.Idle.Add(task.Resreq)
 			ni.Used.Sub(task.Resreq)
-			ni.subResource(ti.Pod)
 		case Pipelined:
 			ni.Pipelined.Sub(task.Resreq)
 		default:
@@ -526,8 +521,6 @@ func (ni *NodeInfo) RemoveTask(ti *TaskInfo) error {
 	}
 
 	delete(ni.Tasks, key)
-
-	return nil
 }
 
 // addResource is used to add sharable devices
@@ -618,20 +611,14 @@ func (ni *NodeInfo) subResource(pod *v1.Pod) {
 }
 
 // UpdateTask is used to update a task in nodeInfo object.
-//
-// If error occurs both task and node are guaranteed to be in the original state.
-func (ni *NodeInfo) UpdateTask(ti *TaskInfo) error {
-	if err := ni.RemoveTask(ti); err != nil {
-		return err
-	}
-
+func (ni *NodeInfo) UpdateTask(ti *TaskInfo) {
+	ni.RemoveTask(ti)
 	if err := ni.AddTask(ti); err != nil {
 		// This should never happen if task removal was successful,
 		// because only possible error during task addition is when task is still on a node.
 		klog.Fatalf("Failed to add Task <%s,%s> to Node <%s> during task update",
 			ti.Namespace, ti.Name, ni.Name)
 	}
-	return nil
 }
 
 // String returns nodeInfo details in string format
@@ -671,11 +658,19 @@ func (ni *NodeInfo) CloneImageSummary() map[string]*fwk.ImageStateSummary {
 	return nodeImageStates
 }
 
-// CloneOthers clone other map resources
+// CloneOthers clone other map resources using deepcopy
 func (ni *NodeInfo) CloneOthers() map[string]interface{} {
 	others := make(map[string]interface{})
 	for k, v := range ni.Others {
-		others[k] = v
+		if d, ok := v.(Devices); ok {
+			if IsNilDevice(d) {
+				others[k] = v
+				continue
+			}
+			others[k] = d.DeepCopy()
+		} else {
+			others[k] = v
+		}
 	}
 	return others
 }

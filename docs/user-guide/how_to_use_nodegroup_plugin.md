@@ -111,6 +111,46 @@ tiers:
 ```
 
 
+### Preferred Nodegroup Priority Ordering
+
+By default, all preferred nodegroups receive the same score. When `enablePreferredOrder` is set to `true`, the order of `preferredDuringSchedulingIgnoredDuringExecution` list determines priority — earlier entries get higher scores.
+
+This is useful when you want tasks to prefer one nodegroup over another. For example, use `spark-fixed` nodes first, and only fall back to `spark-serverless` when `spark-fixed` resources are exhausted.
+
+**Scheduler configuration:**
+```yaml
+actions: "allocate, backfill, preempt, reclaim"
+tiers:
+- plugins:
+  - name: priority
+  - name: gang
+  - name: conformance
+- plugins:
+  - name: drf
+  - name: predicates
+  - name: proportion
+  - name: nodegroup
+    arguments:
+      enablePreferredOrder: true
+```
+
+**Queue configuration:**
+```yaml
+apiVersion: scheduling.volcano.sh/v1beta1
+kind: Queue
+metadata:
+  name: bigdata
+spec:
+  weight: 1
+  affinity:
+    nodeGroupAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+      - spark-fixed        # highest priority
+      - spark-serverless   # lower priority
+```
+
+The score formula is `0.5 * BaseScore * (N - i) / N`, where `N` is the total number of preferred nodegroups and `i` is the 0-based index.
+
 ### Hierarchical Queue Configuration
 
 #### Enabling Hierarchical Support
@@ -256,13 +296,13 @@ spec:
          nodeGroupAffinity:
            requiredDuringSchedulingIgnoredDuringExecution:
            - groupname1
-           - gropuname2
+           - groupname2
            preferredDuringSchedulingIgnoredDuringExecution:
            - groupname1
          nodeGroupAntiAffinity:
            requiredDuringSchedulingIgnoredDuringExecution:
            - groupname3
-           - gropuname4
+           - groupname4
            preferredDuringSchedulingIgnoredDuringExecution:
            - groupname3
    ```
@@ -280,12 +320,12 @@ spec:
        affinity:            # added field
          nodeGroupAffinity:
            requiredDuringSchedulingIgnoredDuringExecution:
-           - gropuname2
+           - groupname2
            preferredDuringSchedulingIgnoredDuringExecution:
            - groupname1
          nodeGroupAntiAffinity:
            requiredDuringSchedulingIgnoredDuringExecution:
-           - gropuname4
+           - groupname4
            preferredDuringSchedulingIgnoredDuringExecution:
            - groupname3
    ```
@@ -303,14 +343,14 @@ spec:
          nodeGroupAffinity:
            requiredDuringSchedulingIgnoredDuringExecution:
            - groupname1
-           - gropuname2
+           - groupname2
            preferredDuringSchedulingIgnoredDuringExecution:
            - groupname1
          nodeGroupAntiAffinity:
            requiredDuringSchedulingIgnoredDuringExecution:
            - groupname1
            preferredDuringSchedulingIgnoredDuringExecution:
-           - gropuname2
+           - groupname2
    ```
    This implies that tasks in the "default" queue can only run on "groupname2".
 
@@ -327,13 +367,13 @@ spec:
          nodeGroupAffinity:
            requiredDuringSchedulingIgnoredDuringExecution:
            - groupname1
-           - gropuname2
+           - groupname2
            preferredDuringSchedulingIgnoredDuringExecution:
            - groupname1
          nodeGroupAntiAffinity:
            requiredDuringSchedulingIgnoredDuringExecution:
            - groupname3
-           - gropuname4
+           - groupname4
            preferredDuringSchedulingIgnoredDuringExecution:
            - groupname3
    ```

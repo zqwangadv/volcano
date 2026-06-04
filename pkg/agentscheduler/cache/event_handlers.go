@@ -39,6 +39,8 @@ import (
 	nodeshardv1alpha1 "volcano.sh/apis/pkg/apis/shard/v1alpha1"
 	"volcano.sh/apis/pkg/apis/utils"
 	schedulingapi "volcano.sh/volcano/pkg/scheduler/api"
+	"volcano.sh/volcano/pkg/scheduler/metrics"
+	schedulercache "volcano.sh/volcano/pkg/schedulercommon/cache"
 )
 
 func isTerminated(status schedulingapi.TaskStatus) bool {
@@ -102,9 +104,7 @@ func (sc *SchedulerCache) updatePod(oldPod, newPod *v1.Pod) error {
 		return nil
 	}
 
-	if err := sc.deletePod(oldPod); err != nil {
-		return err
-	}
+	sc.deletePod(oldPod)
 	//when delete pod, the ownerreference of pod will be set nil, just as orphan pod
 	if len(utils.GetController(newPod)) == 0 {
 		newPod.OwnerReferences = oldPod.OwnerReferences
@@ -112,9 +112,8 @@ func (sc *SchedulerCache) updatePod(oldPod, newPod *v1.Pod) error {
 	return sc.addPod(newPod)
 }
 
-func (sc *SchedulerCache) deleteTask(ti *schedulingapi.TaskInfo) error {
+func (sc *SchedulerCache) deleteTask(ti *schedulingapi.TaskInfo) {
 	// TODO need to refactoring
-	var nodeErr error
 	if len(ti.NodeName) != 0 {
 		// We don't need to delete tasks from the Nodes cache that are already terminated.
 		// These tasks will be cleaned up during the UpdatePod -> updatePod -> deletePod -> deleteTask sequence,
@@ -126,31 +125,20 @@ func (sc *SchedulerCache) deleteTask(ti *schedulingapi.TaskInfo) error {
 				sc.Nodes[ti.NodeName].info.Generation = nextGeneration()
 				sc.moveNodeToHead(ti.NodeName)
 				klog.V(5).Infof("Node %s updated by delete task, generation incremented to %d", ti.NodeName, sc.Nodes[ti.NodeName].info.Generation)
-				nodeErr = node.info.RemoveTask(ti)
+				node.info.RemoveTask(ti)
 			}
 		}
 	}
-
-	if nodeErr != nil {
-		return schedulingapi.MergeErrors(nodeErr)
-	}
-
-	return nil
 }
 
 // Assumes that lock is already acquired.
-func (sc *SchedulerCache) deletePod(pod *v1.Pod) error {
+func (sc *SchedulerCache) deletePod(pod *v1.Pod) {
 	pi, exist := sc.GetTaskInfo(schedulingapi.TaskID(pod.UID))
 	if !exist {
 		// If it doesn't exist, then new a taskinfo, especially for those pods which are not scheduled by agent-scheduler or in restarting scenario
 		pi = schedulingapi.NewTaskInfo(pod)
 	}
-	if err := sc.deleteTask(pi); err != nil {
-		klog.Errorf("Failed to delete task from cache: %v", err)
-		return err
-	}
-
-	return nil
+	sc.deleteTask(pi)
 }
 
 // AddPodToCache add pod to scheduler cache
@@ -170,6 +158,9 @@ func (sc *SchedulerCache) AddPodToCache(obj interface{}) {
 		return
 	}
 	klog.V(3).Infof("Added pod <%s/%v> into cache.", pod.Namespace, pod.Name)
+	if pod.Spec.NodeName == "" {
+		metrics.UpdateTaskScheduleDuration(metrics.TaskStageWatched, metrics.Duration(pod.CreationTimestamp.Time))
+	}
 
 	// Currently we still use AssignedPodAdded and only care about pod affinity and pod topology spread,
 	// directly using MoveAllToActiveOrBackoffQueue may lead to a decrease in throughput.
@@ -213,11 +204,7 @@ func (sc *SchedulerCache) DeletePodFromCache(obj interface{}) {
 	sc.Mutex.Lock()
 	defer sc.Mutex.Unlock()
 
-	err = sc.deletePod(pod)
-	if err != nil {
-		klog.Errorf("Failed to delete pod %v from cache: %v", pod.Name, err)
-		return
-	}
+	sc.deletePod(pod)
 
 	klog.V(3).Infof("Deleted pod <%s/%v> from cache.", pod.Namespace, pod.Name)
 
@@ -404,13 +391,16 @@ func (sc *SchedulerCache) RemoveNode(nodeName string) error {
 }
 
 // AddNode add node to scheduler cache
-func (sc *SchedulerCache) AddNode(obj interface{}) {
+func (sc *SchedulerCache) AddNode(obj interface{}, isInInitialList bool) {
 	node, ok := obj.(*v1.Node)
 	if !ok {
 		klog.Errorf("Cannot convert to *v1.Node: %v", obj)
 		return
 	}
-	sc.nodeQueue.Add(node.Name)
+	sc.nodeQueue.Add(schedulercache.QueueObjectWrapper{Object: node.Name, IsInInitialList: isInInitialList})
+	if isInInitialList {
+		sc.nodeInitialEventTracker.Add(node.Name)
+	}
 }
 
 // UpdateNode update node to scheduler cache
@@ -425,7 +415,7 @@ func (sc *SchedulerCache) UpdateNode(oldObj, newObj interface{}) {
 		klog.Errorf("Cannot convert newObj to *v1.Node: %v", newObj)
 		return
 	}
-	sc.nodeQueue.Add(newNode.Name)
+	sc.nodeQueue.Add(schedulercache.QueueObjectWrapper{Object: newNode.Name, IsInInitialList: false})
 }
 
 // DeleteNode delete node from scheduler cache
@@ -445,7 +435,7 @@ func (sc *SchedulerCache) DeleteNode(obj interface{}) {
 		klog.Errorf("Cannot convert to *v1.Node: %v", t)
 		return
 	}
-	sc.nodeQueue.Add(node.Name)
+	sc.nodeQueue.Add(schedulercache.QueueObjectWrapper{Object: node.Name, IsInInitialList: false})
 }
 
 func (sc *SchedulerCache) SyncNode(nodeName string) error {

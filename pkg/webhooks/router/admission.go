@@ -42,7 +42,7 @@ func RegisterAdmission(service *AdmissionService) error {
 
 	// Also register handler to the service.
 	service.Handler = func(w http.ResponseWriter, r *http.Request) {
-		Serve(w, r, service.Func)
+		serve(w, r, service.Func)
 	}
 
 	admissionMap[service.Path] = service
@@ -51,9 +51,19 @@ func RegisterAdmission(service *AdmissionService) error {
 }
 
 func ForEachAdmission(config *options.Config, handler func(*AdmissionService) error) error {
-	admissions := strings.Split(strings.TrimSpace(config.EnabledAdmission), ",")
+	enabledAdmission := strings.TrimSpace(config.EnabledAdmission)
+	if enabledAdmission == "" {
+		klog.V(3).Infof("No admissions enabled")
+		return nil
+	}
+
+	admissions := strings.Split(enabledAdmission, ",")
 	klog.V(3).Infof("Enabled admissions are: %v, registered map are: %v", admissions, admissionMap)
 	for _, admission := range admissions {
+		admission = strings.TrimSpace(admission)
+		if admission == "" {
+			continue
+		}
 		if service, found := admissionMap[admission]; found {
 			if err := handler(service); err != nil {
 				return err

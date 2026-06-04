@@ -38,6 +38,7 @@ import (
 	fakevcClient "volcano.sh/apis/pkg/client/clientset/versioned/fake"
 	"volcano.sh/volcano/cmd/scheduler/app/options"
 	schedulingapi "volcano.sh/volcano/pkg/scheduler/api"
+	schedulercache "volcano.sh/volcano/pkg/schedulercommon/cache"
 )
 
 // NewCustomMockSchedulerCache returns a mock scheduler cache with custom interface
@@ -124,9 +125,9 @@ func newMockSchedulerCache(schedulerName string) *SchedulerCache {
 		Queues:                 make(map[schedulingapi.QueueID]*schedulingapi.QueueInfo),
 		PriorityClasses:        make(map[string]*schedulingv1.PriorityClass),
 		errTasks:               workqueue.NewTypedRateLimitingQueue[string](workqueue.DefaultTypedControllerRateLimiter[string]()),
-		nodeQueue:              workqueue.NewTypedRateLimitingQueue[string](workqueue.DefaultTypedControllerRateLimiter[string]()),
+		nodeQueue:              workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[schedulercache.QueueObjectWrapper]()),
 		DeletedJobs:            workqueue.NewTypedRateLimitingQueue[string](workqueue.DefaultTypedControllerRateLimiter[string]()),
-		hyperNodesQueue:        workqueue.NewTypedRateLimitingQueue[string](workqueue.DefaultTypedControllerRateLimiter[string]()),
+		hyperNodesQueue:        workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[schedulercache.QueueObjectWrapper]()),
 		kubeClient:             fake.NewSimpleClientset(),
 		vcClient:               fakevcClient.NewSimpleClientset(),
 		restConfig:             nil,
@@ -169,14 +170,15 @@ func (sc *SchedulerCache) initMockInformers() {
 		logger := klog.FromContext(ctx)
 		resourceClaimInformer := informerFactory.Resource().V1().ResourceClaims().Informer()
 		resourceClaimCache := assumecache.NewAssumeCache(logger, resourceClaimInformer, "ResourceClaim", "", nil)
+		sc.resourceClaimCache = resourceClaimCache
 		resourceSliceTrackerOpts := resourceslicetracker.Options{
-			EnableDeviceTaints: utilfeature.DefaultFeatureGate.Enabled(kubefeatures.DRADeviceTaints),
-			SliceInformer:      informerFactory.Resource().V1().ResourceSlices(),
-			KubeClient:         sc.kubeClient,
+			EnableDeviceTaintRules: utilfeature.DefaultFeatureGate.Enabled(kubefeatures.DRADeviceTaints),
+			SliceInformer:          informerFactory.Resource().V1().ResourceSlices(),
+			KubeClient:             sc.kubeClient,
 		}
 		// If device taints are disabled, the additional informers are not needed and
 		// the tracker turns into a simple wrapper around the slice informer.
-		if resourceSliceTrackerOpts.EnableDeviceTaints {
+		if resourceSliceTrackerOpts.EnableDeviceTaintRules {
 			resourceSliceTrackerOpts.TaintInformer = informerFactory.Resource().V1alpha3().DeviceTaintRules()
 			resourceSliceTrackerOpts.ClassInformer = informerFactory.Resource().V1().DeviceClasses()
 		}

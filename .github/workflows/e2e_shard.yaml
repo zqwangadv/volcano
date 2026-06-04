@@ -1,0 +1,100 @@
+name: E2E Shard
+
+on:
+  workflow_call:
+
+jobs:
+  e2e:
+    runs-on: ubuntu-24.04
+    name: ${{ matrix.name }}
+    timeout-minutes: 50
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: E2E Agent Scheduler None
+            target: e2e-test-agentscheduler
+            mode: none
+            logs_dir: e2e-agent-scheduler-none-logs
+            artifact: volcano_e2e_agent_scheduler_none_logs
+          - name: E2E Agent Scheduler Soft
+            target: e2e-test-agentscheduler
+            mode: soft
+            logs_dir: e2e-agent-scheduler-soft-logs
+            artifact: volcano_e2e_agent_scheduler_soft_logs
+          - name: E2E Agent Scheduler Hard
+            target: e2e-test-agentscheduler
+            mode: hard
+            logs_dir: e2e-agent-scheduler-hard-logs
+            artifact: volcano_e2e_agent_scheduler_hard_logs
+          - name: E2E Sharding Controller
+            target: e2e-test-shardingcontroller
+            mode: ""
+            logs_dir: e2e-sharding-controller-logs
+            artifact: volcano_e2e_sharding_controller_logs
+          - name: E2E Scheduler Sharding None
+            target: e2e-test-schedulersharding
+            mode: none
+            logs_dir: e2e-scheduler-sharding-none-logs
+            artifact: volcano_e2e_scheduler_sharding_none_logs
+          - name: E2E Scheduler Sharding Soft
+            target: e2e-test-schedulersharding
+            mode: soft
+            logs_dir: e2e-scheduler-sharding-soft-logs
+            artifact: volcano_e2e_scheduler_sharding_soft_logs
+          - name: E2E Scheduler Sharding Hard
+            target: e2e-test-schedulersharding
+            mode: hard
+            logs_dir: e2e-scheduler-sharding-hard-logs
+            artifact: volcano_e2e_scheduler_sharding_hard_logs
+    steps:
+      - name: Free Disk Space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+
+      - name: Install Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: 1.25.x
+
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/go/pkg/mod
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+
+      - name: Install dependencies
+        run: |
+          GO111MODULE="on" go install sigs.k8s.io/kind@v0.31.0
+          curl -LO https://dl.k8s.io/release/v1.35.0/bin/linux/amd64/kubectl && sudo install kubectl /usr/local/bin/kubectl
+
+      - name: Download Images
+        uses: actions/download-artifact@v4
+        with:
+          name: volcano-images
+          path: _output/images
+
+      - name: Load Images
+        run: |
+          make load-images
+
+      - name: Run E2E Tests
+        run: |
+          export ARTIFACTS_PATH=${{ github.workspace }}/${{ matrix.logs_dir }}
+          make ${{ matrix.target }} SHARDING_MODE=${{ matrix.mode }} FORCE_REBUILD=false
+
+      - name: Upload e2e logs
+        if: '!success()'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ github.workspace }}/${{ matrix.logs_dir }}

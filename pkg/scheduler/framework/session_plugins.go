@@ -24,7 +24,6 @@ import (
 	"context"
 
 	fwk "k8s.io/kube-scheduler/framework"
-	k8sframework "k8s.io/kubernetes/pkg/scheduler/framework"
 
 	"volcano.sh/apis/pkg/apis/scheduling"
 	"volcano.sh/volcano/pkg/controllers/job/helpers"
@@ -59,12 +58,26 @@ func (ssn *Session) AddTaskOrderFn(name string, cf api.CompareFn) {
 
 // AddPreemptableFn add preemptable function
 func (ssn *Session) AddPreemptableFn(name string, cf api.EvictableFn) {
+	if ssn.preemptableFns == nil {
+		ssn.preemptableFns = map[string]api.EvictableFn{}
+	}
 	ssn.preemptableFns[name] = cf
 }
 
 // AddReclaimableFn add Reclaimable function
 func (ssn *Session) AddReclaimableFn(name string, rf api.EvictableFn) {
+	if ssn.reclaimableFns == nil {
+		ssn.reclaimableFns = map[string]api.EvictableFn{}
+	}
 	ssn.reclaimableFns[name] = rf
+}
+
+// AddUnifiedEvictableFn registers a UnifiedEvictableFn for gang-aware victim filtering.
+func (ssn *Session) AddUnifiedEvictableFn(name string, fn api.UnifiedEvictableFn) {
+	if ssn.unifiedEvictableFns == nil {
+		ssn.unifiedEvictableFns = map[string]api.UnifiedEvictableFn{}
+	}
+	ssn.unifiedEvictableFns[name] = fn
 }
 
 // AddJobReadyFn add JobReady function
@@ -307,6 +320,47 @@ func (ssn *Session) Preemptable(preemptor *api.TaskInfo, preemptees []*api.TaskI
 	return victims
 }
 
+// UnifiedEvictable invokes UnifiedEvictableFn plugins for gang-aware victim filtering.
+// Tier walking and intersection semantics match Preemptable/Reclaimable.
+func (ssn *Session) UnifiedEvictable(ctx *api.EvictionContext, candidates []*api.TaskInfo) []*api.TaskInfo {
+	var victims []*api.TaskInfo
+
+	for _, tier := range ssn.Tiers {
+		for _, plugin := range tier.Plugins {
+			fn, found := ssn.unifiedEvictableFns[plugin.Name]
+			if !found {
+				continue
+			}
+			result, abstain := fn(ctx, candidates)
+			if abstain == 0 {
+				continue
+			}
+			if len(result) == 0 {
+				victims = nil
+				break
+			}
+			if victims == nil {
+				victims = result
+			} else {
+				var intersection []*api.TaskInfo
+				for _, v := range victims {
+					for _, c := range result {
+						if v.UID == c.UID {
+							intersection = append(intersection, v)
+						}
+					}
+				}
+				victims = intersection
+			}
+		}
+		if victims != nil {
+			return victims
+		}
+	}
+
+	return victims
+}
+
 // Overused invoke overused function of the plugins
 func (ssn *Session) Overused(queue *api.QueueInfo) bool {
 	for _, tier := range ssn.Tiers {
@@ -327,8 +381,8 @@ func (ssn *Session) Overused(queue *api.QueueInfo) bool {
 	return false
 }
 
-// Preemptive invoke can preemptive function of the plugins
-func (ssn *Session) Preemptive(queue *api.QueueInfo, candidate *api.TaskInfo) bool {
+// Preemptive invokes preemptive functions of the plugins.
+func (ssn *Session) Preemptive(queue *api.QueueInfo, candidates []*api.TaskInfo) bool {
 	for _, tier := range ssn.Tiers {
 		for _, plugin := range tier.Plugins {
 			of, found := ssn.preemptiveFns[plugin.Name]
@@ -338,7 +392,7 @@ func (ssn *Session) Preemptive(queue *api.QueueInfo, candidate *api.TaskInfo) bo
 			if !found {
 				continue
 			}
-			if !of(queue, candidate) {
+			if !of(queue, candidates) {
 				return false
 			}
 		}
@@ -657,8 +711,10 @@ func (ssn *Session) SubJobOrderFn(l, r interface{}) bool {
 	return lv.UID < rv.UID
 }
 
-// JobOrderFn invoke joborder function of the plugins
-func (ssn *Session) JobOrderFn(l, r interface{}) bool {
+// JobOrderCompareFn compares l and r by running enabled JobOrder plugins in
+// order and returning the first non-zero comparison result. It returns 0 if
+// all plugins consider l and r equal.
+func (ssn *Session) JobOrderCompareFn(l, r interface{}) int {
 	for _, tier := range ssn.Tiers {
 		for _, plugin := range tier.Plugins {
 			if !isEnabled(plugin.EnabledJobOrder) {
@@ -669,9 +725,18 @@ func (ssn *Session) JobOrderFn(l, r interface{}) bool {
 				continue
 			}
 			if j := jof(l, r); j != 0 {
-				return j < 0
+				return j
 			}
 		}
+	}
+
+	return 0
+}
+
+// JobOrderFn invoke joborder function of the plugins
+func (ssn *Session) JobOrderFn(l, r interface{}) bool {
+	if res := ssn.JobOrderCompareFn(l, r); res != 0 {
+		return res < 0
 	}
 
 	// If no job order funcs, order job by CreationTimestamp first, then by UID.
@@ -1023,7 +1088,7 @@ func (ssn *Session) HyperNodeOrderMapFn(subJob *api.SubJobInfo, hyperNodes map[s
 }
 
 // NodeOrderReduceFn invoke node order function of the plugins
-func (ssn *Session) NodeOrderReduceFn(task *api.TaskInfo, pluginNodeScoreMap map[string]k8sframework.NodeScoreList) (map[string]float64, error) {
+func (ssn *Session) NodeOrderReduceFn(task *api.TaskInfo, pluginNodeScoreMap map[string]fwk.NodeScoreList) (map[string]float64, error) {
 	nodeScoreMap := map[string]float64{}
 	for _, tier := range ssn.Tiers {
 		for _, plugin := range tier.Plugins {
@@ -1048,7 +1113,7 @@ func (ssn *Session) NodeOrderReduceFn(task *api.TaskInfo, pluginNodeScoreMap map
 // HyperNodeGradientForJobFn group hyperNodes into several gradients,
 // and discard hyperNodes that unmatched the job topology requirements.
 // The result is determined by the first plugin that registered this fn.
-func (ssn *Session) HyperNodeGradientForJobFn(job *api.JobInfo, hyperNode *api.HyperNodeInfo) [][]*api.HyperNodeInfo {
+func (ssn *Session) HyperNodeGradientForJobFn(job *api.JobInfo, hyperNode *api.HyperNodeInfo, purpose api.SearchPurpose) [][]*api.HyperNodeInfo {
 	for _, tier := range ssn.Tiers {
 		for _, plugin := range tier.Plugins {
 			if !isEnabled(plugin.EnabledHyperNodeGradient) {
@@ -1058,7 +1123,7 @@ func (ssn *Session) HyperNodeGradientForJobFn(job *api.JobInfo, hyperNode *api.H
 			if !found {
 				continue
 			}
-			return fn(job, hyperNode)
+			return fn(job, hyperNode, purpose)
 		}
 	}
 
@@ -1069,7 +1134,7 @@ func (ssn *Session) HyperNodeGradientForJobFn(job *api.JobInfo, hyperNode *api.H
 // HyperNodeGradientForSubJobFn group hyperNodes into several gradients,
 // and discard hyperNodes that unmatched the subJob topology requirements.
 // The result is determined by the first plugin that registered this fn.
-func (ssn *Session) HyperNodeGradientForSubJobFn(subJob *api.SubJobInfo, hyperNode *api.HyperNodeInfo) [][]*api.HyperNodeInfo {
+func (ssn *Session) HyperNodeGradientForSubJobFn(subJob *api.SubJobInfo, hyperNode *api.HyperNodeInfo, purpose api.SearchPurpose) [][]*api.HyperNodeInfo {
 	for _, tier := range ssn.Tiers {
 		for _, plugin := range tier.Plugins {
 			if !isEnabled(plugin.EnabledHyperNodeGradient) {
@@ -1079,7 +1144,7 @@ func (ssn *Session) HyperNodeGradientForSubJobFn(subJob *api.SubJobInfo, hyperNo
 			if !found {
 				continue
 			}
-			return fn(subJob, hyperNode)
+			return fn(subJob, hyperNode, purpose)
 		}
 	}
 
@@ -1088,9 +1153,21 @@ func (ssn *Session) HyperNodeGradientForSubJobFn(subJob *api.SubJobInfo, hyperNo
 }
 
 // BuildVictimsPriorityQueue returns a priority queue with victims sorted by:
-// if victims has same job id, sorted by !ssn.TaskOrderFn
-// if victims has different job id, sorted by !ssn.JobOrderFn
+//  1. If victims belong to the same job, use !ssn.TaskOrderFn.
+//  2. If either victim's job is missing, evict orphaned tasks first; if both
+//     are orphaned, use !ssn.TaskOrderFn.
+//  3. If the preemptor job is missing or victims are in the same queue, compare
+//     jobs with JobOrderCompareFn and use !ssn.TaskOrderFn as a tie-break.
+//  4. If victims are in different queues and preemptor job exists, use
+//     ssn.VictimQueueOrderFn.
 func (ssn *Session) BuildVictimsPriorityQueue(victims []*api.TaskInfo, preemptor *api.TaskInfo) *util.PriorityQueue {
+	jobThenTaskOrder := func(lvJob, rvJob *api.JobInfo, l, r interface{}) bool {
+		if cmp := ssn.JobOrderCompareFn(lvJob, rvJob); cmp != 0 {
+			return cmp > 0
+		}
+		return !ssn.TaskOrderFn(l, r)
+	}
+
 	victimsQueue := util.NewPriorityQueue(func(l, r interface{}) bool {
 		lv := l.(*api.TaskInfo)
 		rv := r.(*api.TaskInfo)
@@ -1122,14 +1199,14 @@ func (ssn *Session) BuildVictimsPriorityQueue(victims []*api.TaskInfo, preemptor
 		}
 
 		if !preemptorJobFound {
-			return !ssn.JobOrderFn(lvJob, rvJob)
+			return jobThenTaskOrder(lvJob, rvJob, l, r)
 		}
 
 		if lvJob.Queue != rvJob.Queue {
 			return ssn.VictimQueueOrderFn(ssn.Queues[lvJob.Queue], ssn.Queues[rvJob.Queue], ssn.Queues[preemptorJob.Queue])
 		}
 
-		return !ssn.JobOrderFn(lvJob, rvJob)
+		return jobThenTaskOrder(lvJob, rvJob, l, r)
 	})
 	for _, victim := range victims {
 		victimsQueue.Push(victim)

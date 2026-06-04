@@ -50,21 +50,22 @@ import (
 )
 
 var (
-	OneMinute  = 1 * time.Minute
-	TwoMinute  = 2 * time.Minute
-	FiveMinute = 5 * time.Minute
-	TenMinute  = 10 * time.Minute
-	OneCPU     = v1.ResourceList{"cpu": resource.MustParse("1000m")}
-	TwoCPU     = v1.ResourceList{"cpu": resource.MustParse("2000m")}
-	ThreeCPU   = v1.ResourceList{"cpu": resource.MustParse("3000m")}
-	ThirtyCPU  = v1.ResourceList{"cpu": resource.MustParse("30000m")}
-	HalfCPU    = v1.ResourceList{"cpu": resource.MustParse("500m")}
-	CPU1Mem1   = v1.ResourceList{"cpu": resource.MustParse("1000m"), "memory": resource.MustParse("1024Mi")}
-	CPU2Mem2   = v1.ResourceList{"cpu": resource.MustParse("2000m"), "memory": resource.MustParse("2048Mi")}
-	CPU3Mem3   = v1.ResourceList{"cpu": resource.MustParse("3000m"), "memory": resource.MustParse("3072Mi")}
-	CPU4Mem4   = v1.ResourceList{"cpu": resource.MustParse("4000m"), "memory": resource.MustParse("4096Mi")}
-	CPU5Mem5   = v1.ResourceList{"cpu": resource.MustParse("5000m"), "memory": resource.MustParse("5120Mi")}
-	CPU6Mem6   = v1.ResourceList{"cpu": resource.MustParse("6000m"), "memory": resource.MustParse("6144Mi")}
+	OneMinute   = 1 * time.Minute
+	TwoMinute   = 2 * time.Minute
+	ThreeMinute = 3 * time.Minute
+	FiveMinute  = 5 * time.Minute
+	TenMinute   = 10 * time.Minute
+	OneCPU      = v1.ResourceList{"cpu": resource.MustParse("1000m")}
+	TwoCPU      = v1.ResourceList{"cpu": resource.MustParse("2000m")}
+	ThreeCPU    = v1.ResourceList{"cpu": resource.MustParse("3000m")}
+	ThirtyCPU   = v1.ResourceList{"cpu": resource.MustParse("30000m")}
+	HalfCPU     = v1.ResourceList{"cpu": resource.MustParse("500m")}
+	CPU1Mem1    = v1.ResourceList{"cpu": resource.MustParse("1000m"), "memory": resource.MustParse("1024Mi")}
+	CPU2Mem2    = v1.ResourceList{"cpu": resource.MustParse("2000m"), "memory": resource.MustParse("2048Mi")}
+	CPU3Mem3    = v1.ResourceList{"cpu": resource.MustParse("3000m"), "memory": resource.MustParse("3072Mi")}
+	CPU4Mem4    = v1.ResourceList{"cpu": resource.MustParse("4000m"), "memory": resource.MustParse("4096Mi")}
+	CPU5Mem5    = v1.ResourceList{"cpu": resource.MustParse("5000m"), "memory": resource.MustParse("5120Mi")}
+	CPU6Mem6    = v1.ResourceList{"cpu": resource.MustParse("6000m"), "memory": resource.MustParse("6144Mi")}
 )
 
 const (
@@ -129,18 +130,20 @@ type TestContext struct {
 	Kubeclient *kubernetes.Clientset
 	Vcclient   *vcclient.Clientset
 
-	Namespace        string
-	Queues           []string
-	DeservedResource map[string]v1.ResourceList
-	QueueParent      map[string]string
-	PriorityClasses  map[string]int32
-	UsingPlaceHolder bool
+	Namespace          string
+	Queues             []string
+	DeservedResource   map[string]v1.ResourceList
+	CapabilityResource map[string]v1.ResourceList
+	QueueParent        map[string]string
+	PriorityClasses    map[string]int32
+	UsingPlaceHolder   bool
 }
 
 type Options struct {
 	Namespace          string
 	Queues             []string
 	DeservedResource   map[string]v1.ResourceList
+	CapabilityResource map[string]v1.ResourceList
 	QueueParent        map[string]string
 	PriorityClasses    map[string]int32
 	NodesNumLimit      int
@@ -157,14 +160,15 @@ func InitTestContext(o Options) *TestContext {
 		o.Namespace = helpers.GenRandomStr(8)
 	}
 	ctx := &TestContext{
-		Namespace:        o.Namespace,
-		Queues:           o.Queues,
-		DeservedResource: o.DeservedResource,
-		QueueParent:      o.QueueParent,
-		PriorityClasses:  o.PriorityClasses,
-		Vcclient:         VcClient,
-		Kubeclient:       KubeClient,
-		UsingPlaceHolder: false,
+		Namespace:          o.Namespace,
+		Queues:             o.Queues,
+		DeservedResource:   o.DeservedResource,
+		CapabilityResource: o.CapabilityResource,
+		QueueParent:        o.QueueParent,
+		PriorityClasses:    o.PriorityClasses,
+		Vcclient:           VcClient,
+		Kubeclient:         KubeClient,
+		UsingPlaceHolder:   false,
 	}
 
 	_, err := ctx.Kubeclient.CoreV1().Namespaces().Create(context.TODO(),

@@ -57,6 +57,7 @@ import (
 	"volcano.sh/apis/pkg/apis/utils"
 	schedulingapi "volcano.sh/volcano/pkg/scheduler/api"
 	"volcano.sh/volcano/pkg/scheduler/metrics"
+	schedulercache "volcano.sh/volcano/pkg/schedulercommon/cache"
 )
 
 var DefaultAttachableVolumeQuantity int64 = math.MaxInt32
@@ -249,6 +250,13 @@ func (sc *SchedulerCache) NewTaskInfo(pod *v1.Pod) (*schedulingapi.TaskInfo, err
 	}
 	// Update BestEffort because the InitResreq maybe changes
 	taskInfo.BestEffort = taskInfo.InitResreq.IsEmpty()
+	draResreq, claimDRAResreq, claimKeys, err := sc.buildTaskDRAInfo(pod)
+	if err != nil {
+		return taskInfo, err
+	}
+	taskInfo.DRAResreq = draResreq
+	taskInfo.ResourceClaimDRAResreq = claimDRAResreq
+	taskInfo.ResourceClaimKeys = claimKeys
 	return taskInfo, nil
 }
 
@@ -256,8 +264,17 @@ func (sc *SchedulerCache) NewTaskInfo(pod *v1.Pod) (*schedulingapi.TaskInfo, err
 func (sc *SchedulerCache) addPod(pod *v1.Pod) error {
 	pi, err := sc.NewTaskInfo(pod)
 	if err != nil {
+		if isPendingDRAResourceClaimError(err) {
+			klog.V(4).Infof("DRA ResourceClaim for pod <%s/%s> is not ready, add task to cache and retry: %v", pod.Namespace, pod.Name, err)
+			if addErr := sc.addTask(pi); addErr != nil {
+				return addErr
+			}
+			sc.resyncTask(pi)
+			return nil
+		}
 		klog.Errorf("generate taskInfo for pod(%s) failed: %v", pod.Name, err)
 		sc.resyncTask(pi)
+		return err
 	}
 
 	return sc.addTask(pi)
@@ -331,11 +348,9 @@ func (sc *SchedulerCache) updatePod(oldPod, newPod *v1.Pod) error {
 }
 
 func (sc *SchedulerCache) deleteTask(ti *schedulingapi.TaskInfo) error {
-	var jobErr, nodeErr error
-
 	if len(ti.Job) != 0 {
 		if job, found := sc.Jobs[ti.Job]; found {
-			jobErr = job.DeleteTaskInfo(ti)
+			job.DeleteTaskInfo(ti)
 		} else {
 			klog.Warningf("Failed to find Job <%v> for Task <%v/%v> in cache.", ti.Job, ti.Namespace, ti.Name)
 		}
@@ -351,13 +366,9 @@ func (sc *SchedulerCache) deleteTask(ti *schedulingapi.TaskInfo) error {
 		if !isTerminated(ti.Status) {
 			node := sc.Nodes[ti.NodeName]
 			if node != nil {
-				nodeErr = node.RemoveTask(ti)
+				node.RemoveTask(ti)
 			}
 		}
-	}
-
-	if jobErr != nil || nodeErr != nil {
-		return schedulingapi.MergeErrors(jobErr, nodeErr)
 	}
 
 	return nil
@@ -403,6 +414,9 @@ func (sc *SchedulerCache) AddPod(obj interface{}) {
 		klog.Errorf("Failed to add pod <%s/%s> into cache: %v",
 			pod.Namespace, pod.Name, err)
 		return
+	}
+	if pod.Spec.NodeName == "" {
+		metrics.UpdateTaskScheduleDuration(metrics.TaskStageWatched, metrics.Duration(pod.CreationTimestamp.Time))
 	}
 	klog.V(3).Infof("Added pod <%s/%v> into cache.", pod.Namespace, pod.Name)
 }
@@ -560,14 +574,18 @@ func (sc *SchedulerCache) RemoveNode(nodeName string) error {
 }
 
 // AddNode add node to scheduler cache
-func (sc *SchedulerCache) AddNode(obj interface{}) {
+func (sc *SchedulerCache) AddNode(obj interface{}, isInInitialList bool) {
 	node, ok := obj.(*v1.Node)
 	if !ok {
 		klog.Errorf("Cannot convert to *v1.Node: %v", obj)
 		return
 	}
-	sc.nodeQueue.Add(node.Name)
-	sc.hyperNodesQueue.Add(string(hyperNodeEventSourceNode) + "/" + node.Name)
+	sc.nodeQueue.Add(schedulercache.QueueObjectWrapper{Object: node.Name, IsInInitialList: isInInitialList})
+	sc.hyperNodesQueue.Add(schedulercache.QueueObjectWrapper{Object: string(hyperNodeEventSourceNode) + "/" + node.Name, IsInInitialList: isInInitialList})
+	if isInInitialList {
+		sc.nodeInitialEventTracker.Add(node.Name)
+		sc.hyperNodesInitialEventTracker.Add(string(hyperNodeEventSourceNode) + "/" + node.Name)
+	}
 }
 
 // UpdateNode update node to scheduler cache
@@ -582,9 +600,9 @@ func (sc *SchedulerCache) UpdateNode(oldObj, newObj interface{}) {
 		klog.Errorf("Cannot convert newObj to *v1.Node: %v", newObj)
 		return
 	}
-	sc.nodeQueue.Add(newNode.Name)
+	sc.nodeQueue.Add(schedulercache.QueueObjectWrapper{Object: newNode.Name, IsInInitialList: false})
 	if !reflect.DeepEqual(oldNode.GetLabels(), newNode.GetLabels()) {
-		sc.hyperNodesQueue.Add(string(hyperNodeEventSourceNode) + "/" + newNode.Name)
+		sc.hyperNodesQueue.Add(schedulercache.QueueObjectWrapper{Object: string(hyperNodeEventSourceNode) + "/" + newNode.Name, IsInInitialList: false})
 	}
 }
 
@@ -605,8 +623,8 @@ func (sc *SchedulerCache) DeleteNode(obj interface{}) {
 		klog.Errorf("Cannot convert to *v1.Node: %v", t)
 		return
 	}
-	sc.nodeQueue.Add(node.Name)
-	sc.hyperNodesQueue.Add(string(hyperNodeEventSourceNode) + "/" + node.Name)
+	sc.nodeQueue.Add(schedulercache.QueueObjectWrapper{Object: node.Name, IsInInitialList: false})
+	sc.hyperNodesQueue.Add(schedulercache.QueueObjectWrapper{Object: string(hyperNodeEventSourceNode) + "/" + node.Name, IsInInitialList: false})
 }
 
 func (sc *SchedulerCache) SyncNode(nodeName string) error {
@@ -656,7 +674,7 @@ func (sc *SchedulerCache) nodeCanAddCache(node *v1.Node) bool {
 	return false
 }
 
-func (sc *SchedulerCache) AddOrUpdateCSINode(obj interface{}) {
+func (sc *SchedulerCache) AddOrUpdateCSINode(obj interface{}, isInInitialList bool) {
 	csiNode, ok := obj.(*sv1.CSINode)
 	if !ok {
 		return
@@ -674,7 +692,11 @@ func (sc *SchedulerCache) AddOrUpdateCSINode(obj interface{}) {
 		csiNodeStatus.DriverStatus[d.Name] = d.Allocatable != nil && d.Allocatable.Count != nil
 	}
 	sc.CSINodesStatus[csiNode.Name] = csiNodeStatus
-	sc.nodeQueue.Add(csiNode.Name)
+	if isInInitialList {
+		//track the obj handling from initial list
+		sc.nodeInitialEventTracker.Add(csiNode.Name)
+	}
+	sc.nodeQueue.Add(schedulercache.QueueObjectWrapper{Object: csiNode.Name, IsInInitialList: isInInitialList})
 }
 
 func (sc *SchedulerCache) UpdateCSINode(oldObj, newObj interface{}) {
@@ -689,7 +711,7 @@ func (sc *SchedulerCache) UpdateCSINode(oldObj, newObj interface{}) {
 	if equality.Semantic.DeepEqual(oldCSINode.Spec, newCSINode.Spec) {
 		return
 	}
-	sc.AddOrUpdateCSINode(newObj)
+	sc.AddOrUpdateCSINode(newObj, false)
 }
 
 func (sc *SchedulerCache) DeleteCSINode(obj interface{}) {
@@ -712,7 +734,7 @@ func (sc *SchedulerCache) DeleteCSINode(obj interface{}) {
 	sc.Mutex.Lock()
 	delete(sc.CSINodesStatus, csiNode.Name)
 	sc.Mutex.Unlock()
-	sc.nodeQueue.Add(csiNode.Name)
+	sc.nodeQueue.Add(schedulercache.QueueObjectWrapper{Object: csiNode.Name, IsInInitialList: false})
 }
 
 func (sc *SchedulerCache) SyncHyperNode(name string) error {
@@ -1354,13 +1376,18 @@ func (sc *SchedulerCache) setCSIResourceOnNode(csiNode *sv1.CSINode, node *v1.No
 }
 
 // AddHyperNode adds hyperNode name to the hyperNodesQueue.
-func (sc *SchedulerCache) AddHyperNode(obj interface{}) {
+func (sc *SchedulerCache) AddHyperNode(obj interface{}, isInInitialList bool) {
 	hn, ok := obj.(*topologyv1alpha1.HyperNode)
 	if !ok {
 		klog.ErrorS(nil, "Cannot convert to *topologyv1alpha1.HyperNode", "type", reflect.TypeOf(obj))
 		return
 	}
-	sc.hyperNodesQueue.Add(string(hyperNodeEventSourceHyperNode) + "/" + hn.Name)
+	object := string(hyperNodeEventSourceHyperNode) + "/" + hn.Name
+	sc.hyperNodesQueue.Add(schedulercache.QueueObjectWrapper{Object: object, IsInInitialList: isInInitialList})
+	if isInInitialList {
+		//tack the obj handling from inital list
+		sc.hyperNodesInitialEventTracker.Add(object)
+	}
 }
 
 // UpdateHyperNode adds hyperNode name to the hyperNodesQueue.
@@ -1370,7 +1397,7 @@ func (sc *SchedulerCache) UpdateHyperNode(oldObj, newObj interface{}) {
 		klog.ErrorS(nil, "Cannot convert newObj to *topologyv1alpha1.HyperNode: %v", reflect.TypeOf(newObj))
 		return
 	}
-	sc.hyperNodesQueue.Add(string(hyperNodeEventSourceHyperNode) + "/" + newHyperNode.Name)
+	sc.hyperNodesQueue.Add(schedulercache.QueueObjectWrapper{Object: string(hyperNodeEventSourceHyperNode) + "/" + newHyperNode.Name, IsInInitialList: false})
 }
 
 // DeleteHyperNode adds hyperNode name to the hyperNodesQueue.
@@ -1390,7 +1417,7 @@ func (sc *SchedulerCache) DeleteHyperNode(obj interface{}) {
 		klog.ErrorS(nil, "Cannot convert to HyperNode", "type", reflect.TypeOf(t))
 		return
 	}
-	sc.hyperNodesQueue.Add(string(hyperNodeEventSourceHyperNode) + "/" + hn.Name)
+	sc.hyperNodesQueue.Add(schedulercache.QueueObjectWrapper{Object: string(hyperNodeEventSourceHyperNode) + "/" + hn.Name, IsInInitialList: false})
 }
 
 // UpdateHyperNode updates HyperNode and rebuild HyperNodesInfo cache, it does three things in order:

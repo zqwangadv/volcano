@@ -146,7 +146,7 @@ func (ra *Action) Execute(ssn *framework.Session) {
 					continue
 				}
 
-				if !ssn.Preemptive(queue, task) {
+				if !ssn.Preemptive(queue, []*api.TaskInfo{task}) {
 					klog.V(3).Infof("Queue <%s> cannot reclaim for task <%s>, skip", queue.Name, task.Name)
 					continue
 				}
@@ -219,37 +219,39 @@ func (ra *Action) reclaimForTask(ssn *framework.Session, stmt *framework.Stateme
 		// The reclaimed resources should be added to the remaining available resources of the nodes to avoid over-reclaiming.
 		availableResources := n.FutureIdle()
 
+		// Use a per-node statement so that evictions are isolated to this node.
+		// Only merge into the caller's stmt if Pipeline succeeds; otherwise discard
+		// so victims on nodes that end up unused are never committed to Kubernetes.
+		nodeStmt := framework.NewStatement(ssn)
 		evictionOccurred := false
 		for !victimsQueue.Empty() {
-			reclaimee := victimsQueue.Pop().(*api.TaskInfo)
-			klog.V(3).Infof("Try to reclaim Task <%s/%s> for Tasks <%s/%s>",
-				reclaimee.Namespace, reclaimee.Name, task.Namespace, task.Name)
-			if err := stmt.Evict(reclaimee, "reclaim"); err != nil {
-				klog.Errorf("Failed to reclaim Task <%s/%s> for Tasks <%s/%s>: %v",
-					reclaimee.Namespace, reclaimee.Name, task.Namespace, task.Name, err)
-				continue
-			}
-			reclaimed.Add(reclaimee.Resreq)
-			availableResources.Add(reclaimee.Resreq)
-			evictionOccurred = true
 			if resreq.LessEqual(availableResources, api.Zero) {
 				break
 			}
+			reclaimee := victimsQueue.Pop().(*api.TaskInfo)
+			klog.V(3).Infof("Try to reclaim Task <%s/%s> for Tasks <%s/%s>",
+				reclaimee.Namespace, reclaimee.Name, task.Namespace, task.Name)
+			nodeStmt.Evict(reclaimee, "reclaim")
+			reclaimed.Add(reclaimee.Resreq)
+			availableResources.Add(reclaimee.Resreq)
+			evictionOccurred = true
 		}
 
 		klog.V(3).Infof("Reclaimed <%v> for task <%s/%s> requested <%v>, and Node <%s> availableResources <%v>.", reclaimed, task.Namespace, task.Name, task.InitResreq, n.Name, availableResources)
 
-		if task.InitResreq.LessEqual(availableResources, api.Zero) {
-			if err := stmt.Pipeline(task, n.Name, evictionOccurred); err != nil {
-				klog.Errorf("Failed to pipeline Task <%s/%s> on Node <%s>",
-					task.Namespace, task.Name, n.Name)
-				if rollbackErr := stmt.UnPipeline(task); rollbackErr != nil {
-					klog.Errorf("Failed to unpipeline Task %v on %v in Session %v for %v.",
-						task.UID, n.Name, ssn.UID, rollbackErr)
-				}
-			}
-			break
+		if !resreq.LessEqual(availableResources, api.Zero) {
+			nodeStmt.Discard()
+			continue
 		}
+
+		if err := nodeStmt.Pipeline(task, n.Name, evictionOccurred); err != nil {
+			klog.Errorf("Failed to pipeline Task <%s/%s> on Node <%s>",
+				task.Namespace, task.Name, n.Name)
+			nodeStmt.Discard()
+			continue
+		}
+		stmt.Merge(nodeStmt)
+		break
 	}
 }
 

@@ -16,6 +16,7 @@ limitations under the License.
 package main
 
 import (
+	"flag"
 	"fmt"
 	"os"
 	"runtime"
@@ -25,11 +26,13 @@ import (
 	_ "go.uber.org/automaxprocs"
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
+	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	cliflag "k8s.io/component-base/cli/flag"
 	"k8s.io/klog/v2"
 
 	"volcano.sh/volcano/cmd/webhook-manager/app"
 	"volcano.sh/volcano/cmd/webhook-manager/app/options"
+	_ "volcano.sh/volcano/pkg/features"
 	"volcano.sh/volcano/pkg/version"
 	_ "volcano.sh/volcano/pkg/webhooks/admission/cronjobs/validate"
 	_ "volcano.sh/volcano/pkg/webhooks/admission/hypernodes/validate"
@@ -49,9 +52,15 @@ var logFlushFreq = pflag.Duration("log-flush-frequency", 5*time.Second, "Maximum
 func main() {
 	runtime.GOMAXPROCS(runtime.NumCPU())
 	klog.InitFlags(nil)
+	// Opt into the new klog behavior so that -stderrthreshold is honored even
+	// when -logtostderr=true (the default).
+	// Ref: kubernetes/klog#212, kubernetes/klog#432
+	flag.Set("legacy_stderr_threshold_behavior", "false") //nolint:errcheck
+	flag.Set("stderrthreshold", "INFO")                   //nolint:errcheck
 
 	config := options.NewConfig()
 	config.AddFlags(pflag.CommandLine)
+	utilfeature.DefaultMutableFeatureGate.AddFlag(pflag.CommandLine)
 
 	cliflag.InitFlags()
 

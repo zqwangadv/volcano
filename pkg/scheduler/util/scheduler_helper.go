@@ -28,16 +28,19 @@ import (
 	"math/rand"
 	"sort"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
-	k8sframework "k8s.io/kubernetes/pkg/scheduler/framework"
+	fwk "k8s.io/kube-scheduler/framework"
 
 	"volcano.sh/volcano/cmd/scheduler/app/options"
 	"volcano.sh/volcano/pkg/scheduler/api"
+	"volcano.sh/volcano/pkg/scheduler/metrics"
 )
 
 const (
@@ -46,7 +49,7 @@ const (
 	DefaultComponentName = "vc-scheduler"
 )
 
-var lastProcessedNodeIndex int
+var lastProcessedNodeIndex atomic.Int64
 
 // CalculateNumOfFeasibleNodesToFind returns the number of feasible nodes that once found,
 // the scheduler stops its search for more feasible nodes.
@@ -73,7 +76,7 @@ func CalculateNumOfFeasibleNodesToFind(numAllNodes int32) (numNodes int32) {
 
 // PrioritizeNodes returns a map whose key is node's score and value are corresponding nodes
 func PrioritizeNodes(task *api.TaskInfo, nodes []*api.NodeInfo, batchFn api.BatchNodeOrderFn, mapFn api.NodeOrderMapFn, reduceFn api.NodeOrderReduceFn) map[float64][]*api.NodeInfo {
-	pluginNodeScoreMap := map[string]k8sframework.NodeScoreList{}
+	pluginNodeScoreMap := map[string]fwk.NodeScoreList{}
 	nodeOrderScoreMap := map[string]float64{}
 	nodeScores := map[float64][]*api.NodeInfo{}
 	var workerLock sync.Mutex
@@ -89,9 +92,9 @@ func PrioritizeNodes(task *api.TaskInfo, nodes []*api.NodeInfo, batchFn api.Batc
 		for plugin, score := range mapScores {
 			nodeScoreList, ok := pluginNodeScoreMap[plugin]
 			if !ok {
-				nodeScoreList = k8sframework.NodeScoreList{}
+				nodeScoreList = fwk.NodeScoreList{}
 			}
-			hp := k8sframework.NodeScore{}
+			hp := fwk.NodeScore{}
 			hp.Name = node.Name
 			hp.Score = int64(math.Floor(score))
 			pluginNodeScoreMap[plugin] = append(nodeScoreList, hp)
@@ -99,6 +102,7 @@ func PrioritizeNodes(task *api.TaskInfo, nodes []*api.NodeInfo, batchFn api.Batc
 		nodeOrderScoreMap[node.Name] = orderScore
 		workerLock.Unlock()
 	}
+	scoreStart := time.Now()
 	workqueue.ParallelizeUntil(context.TODO(), 16, len(nodes), scoreNode)
 	reduceScores, err := reduceFn(task, pluginNodeScoreMap)
 	if err != nil {
@@ -111,6 +115,7 @@ func PrioritizeNodes(task *api.TaskInfo, nodes []*api.NodeInfo, batchFn api.Batc
 		klog.Errorf("Error in Calculating batch Priority for the node, err %v", err)
 		return nodeScores
 	}
+	metrics.UpdateSchedulingStageDuration(metrics.SchedulingStageScoring, time.Since(scoreStart))
 
 	nodeScoreMap := map[string]float64{}
 	for _, node := range nodes {
@@ -222,16 +227,30 @@ func SelectBestHyperNodeAndScore(hyperNodeScores map[float64][]string) (string, 
 	return bestHyperNodes[rand.Intn(len(bestHyperNodes))], maxScore
 }
 
-// SelectBestNodesAndScores returns the best N node whose score is highest N score, pick one randomly if there are many nodes with same score.
-func SelectBestNodesAndScores(nodeScores map[float64][]*api.NodeInfo, count int) ([]*api.NodeInfo, []float64) {
+// SelectBestNodes returns the best N node whose score is highest N score, pick one randomly if there are many nodes with same score.
+// Nodes in nodesInBinder will be downgraded to reduce the conflict with binder.
+func SelectBestNodes(nodeScores map[float64][]*api.NodeInfo, count int, nodesInBinder map[string]int) []*api.NodeInfo {
 	bestNodes := []*api.NodeInfo{}
-	scores := []float64{}
+	lowPriorityNodes := make([]*api.NodeInfo, 0, len(nodesInBinder))
 	if count <= 0 || len(nodeScores) == 0 {
-		return bestNodes, scores
+		return bestNodes
 	}
 	allScores := make([]float64, 0, len(nodeScores))
-	for score := range nodeScores {
+	nodeCount := 0
+	for score, nodes := range nodeScores {
 		allScores = append(allScores, score)
+		nodeCount += len(nodes)
+	}
+
+	downgradeNode := false
+	if nodeCount >= count {
+		bestNodes = make([]*api.NodeInfo, 0, count)
+	}
+	//
+	// It is possible that nodes with high scores were sent to binder in previous scheduling round and not handled yet, so scheduling on these nodes may conflict if same node is chosen in binder,
+	// then the node selected in this scheduling round will be rejected by binder. In this case, select nodes not in binder first to reduce the conflict if the number of qulified nodes is much larger than the candidate count.
+	if nodeCount > count && len(nodesInBinder) > 0 {
+		downgradeNode = true
 	}
 	sort.Sort(sort.Reverse(sort.Float64Slice(allScores)))
 
@@ -244,15 +263,26 @@ func SelectBestNodesAndScores(nodeScores map[float64][]*api.NodeInfo, count int)
 			})
 		}
 		for _, node := range nodes {
+			if downgradeNode {
+				if count, ok := nodesInBinder[node.Name]; ok && count > 0 {
+					lowPriorityNodes = append(lowPriorityNodes, node)
+					continue
+				}
+			}
 			bestNodes = append(bestNodes, node)
-			scores = append(scores, score)
 			selecteNodeCount++
-			if len(nodes) == count {
-				return nodes, scores
+			if len(bestNodes) == count {
+				return bestNodes
 			}
 		}
 	}
-	return bestNodes, scores
+	if downgradeNode {
+		selectedNodeCount := len(bestNodes)
+		if selectedNodeCount < count {
+			bestNodes = append(bestNodes, lowPriorityNodes[:count-selectedNodeCount]...)
+		}
+	}
+	return bestNodes
 }
 
 // GetNodeList returns values of the map 'nodes'

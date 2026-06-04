@@ -30,7 +30,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/record"
-	"k8s.io/kubernetes/pkg/scheduler/framework"
+	fwk "k8s.io/kube-scheduler/framework"
 
 	vcclient "volcano.sh/apis/pkg/client/clientset/versioned"
 	vcinformer "volcano.sh/apis/pkg/client/informers/externalversions"
@@ -55,6 +55,11 @@ type Cache interface {
 	// AddBindTask binds Task to the target host.
 	// TODO(jinzhej): clean up expire Tasks.
 	AddBindTask(bindCtx *agentapi.BindContext) error
+
+	// RecordCandidateNodesInBinder records candidate nodes to be checked in binder and these nodes are waiting to be checked in binder.
+	RecordCandidateNodesInBinder(nodes []*api.NodeInfo)
+
+	RemoveCandidateNodesFromBinder(nodes []*api.NodeInfo)
 
 	// Client returns the kubernetes clientSet, which can be used by plugins
 	Client() kubernetes.Interface
@@ -83,7 +88,7 @@ type Cache interface {
 	RegisterBinder(name string, binder interface{})
 
 	// SharedDRAManager returns the shared DRAManager
-	SharedDRAManager() framework.SharedDRAManager
+	SharedDRAManager() fwk.SharedDRAManager
 
 	// UpdateSnapshot is used to update the passed-in snapshot to ensure consistency between the cache's nodeinfo and the snapshot.
 	UpdateSnapshot(snapshot *k8sutil.Snapshot) error
